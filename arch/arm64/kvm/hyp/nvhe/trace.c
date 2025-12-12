@@ -485,7 +485,7 @@ static void rb_teardown_bpage_backing(void)
 	hyp_buffer_pages_backing.size = 0;
 }
 
-int __pkvm_rb_update_footers(int cpu)
+int __pkvm_rb_update_footers(unsigned int cpu)
 {
 	struct hyp_rb_per_cpu *cpu_buffer;
 	int ret = 0;
@@ -508,9 +508,9 @@ int __pkvm_rb_update_footers(int cpu)
 	return ret;
 }
 
-int __pkvm_rb_swap_reader_page(int cpu)
+int __pkvm_rb_swap_reader_page(unsigned int cpu)
 {
-	struct hyp_rb_per_cpu *cpu_buffer = per_cpu_ptr(&trace_rb, cpu);
+	struct hyp_rb_per_cpu *cpu_buffer;
 	int ret = 0;
 
 	if (cpu >= hyp_nr_cpus)
@@ -559,7 +559,7 @@ int __pkvm_load_tracing(unsigned long pack_hva, size_t pack_size)
 	struct trace_buffer_pack *trace_pack = &pack->trace_buffer_pack;
 	struct hyp_buffer_page *bpage_backing_start;
 	struct ring_buffer_pack *rb_pack;
-	int ret, cpu;
+	int ret, pack_cpu;
 
 	if (!pack_size || !PAGE_ALIGNED(pack_hva) || !PAGE_ALIGNED(pack_size))
 		return -EINVAL;
@@ -579,9 +579,9 @@ int __pkvm_load_tracing(unsigned long pack_hva, size_t pack_size)
 
 	bpage_backing_start = (struct hyp_buffer_page *)hyp_buffer_pages_backing.start;
 
-	for_each_ring_buffer_pack(rb_pack, cpu, trace_pack) {
+	for_each_ring_buffer_pack(rb_pack, pack_cpu, trace_pack) {
 		struct hyp_rb_per_cpu *cpu_buffer;
-		int cpu;
+		unsigned int cpu;
 
 		ret = -EINVAL;
 		if (!rb_cpu_fits_pack(rb_pack, pack_hva + pack_size))

@@ -1616,7 +1616,7 @@ static int rproc_attach(struct rproc *rproc)
 	ret = rproc_set_rsc_table(rproc);
 	if (ret) {
 		dev_err(dev, "can't load resource table: %d\n", ret);
-		goto unprepare_device;
+		goto clean_up_resources;
 	}
 
 	/* reset max_notifyid */
@@ -1633,7 +1633,7 @@ static int rproc_attach(struct rproc *rproc)
 	ret = rproc_handle_resources(rproc, rproc_loading_handlers);
 	if (ret) {
 		dev_err(dev, "Failed to process resources: %d\n", ret);
-		goto unprepare_device;
+		goto clean_up_resources;
 	}
 
 	/* Allocate carveout resources associated to rproc */
@@ -1652,9 +1652,9 @@ static int rproc_attach(struct rproc *rproc)
 
 clean_up_resources:
 	rproc_resource_cleanup(rproc);
-unprepare_device:
 	/* release HW resources if needed */
 	rproc_unprepare_device(rproc);
+	kfree(rproc->clean_table);
 disable_iommu:
 	rproc_disable_iommu(rproc);
 	return ret;
@@ -1907,13 +1907,6 @@ out:
  * Return: 0 on success, and an appropriate error value otherwise
  */
 int rproc_boot(struct rproc *rproc)
-#if IS_ENABLED(CONFIG_MTK_CCU_DEBUG)
-{
-	return rproc_bootx(rproc, RPROC_UID_MAX+1);
-}
-
-int rproc_bootx(struct rproc *rproc, unsigned int uid)
-#endif
 {
 	const struct firmware *firmware_p;
 	struct device *dev;
@@ -1926,16 +1919,8 @@ int rproc_bootx(struct rproc *rproc, unsigned int uid)
 
 	dev = &rproc->dev;
 
-#if IS_ENABLED(CONFIG_MTK_CCU_DEBUG)
-	if (uid < RPROC_UID_MAX)
-		atomic_inc(&(rproc->bootcnt[uid][0]));
-#endif
 	ret = mutex_lock_interruptible(&rproc->lock);
 	if (ret) {
-#if IS_ENABLED(CONFIG_MTK_CCU_DEBUG)
-		if (uid < RPROC_UID_MAX)
-			atomic_inc(&(rproc->bootcnt[uid][1]));
-#endif
 		dev_err(dev, "can't lock rproc %s: %d\n", rproc->name, ret);
 		return ret;
 	}
@@ -1974,19 +1959,11 @@ int rproc_bootx(struct rproc *rproc, unsigned int uid)
 downref_rproc:
 	if (ret)
 		atomic_dec(&rproc->power);
-#if IS_ENABLED(CONFIG_MTK_CCU_DEBUG)
-	if ((ret) && (uid < RPROC_UID_MAX))
-		atomic_inc(&(rproc->bootcnt[uid][2]));
-#endif
-
 unlock_mutex:
 	mutex_unlock(&rproc->lock);
 	return ret;
 }
 EXPORT_SYMBOL(rproc_boot);
-#if IS_ENABLED(CONFIG_MTK_CCU_DEBUG)
-EXPORT_SYMBOL(rproc_bootx);
-#endif
 
 /**
  * rproc_shutdown() - power off the remote processor
@@ -2010,13 +1987,6 @@ EXPORT_SYMBOL(rproc_bootx);
  * Return: 0 on success, and an appropriate error value otherwise
  */
 int rproc_shutdown(struct rproc *rproc)
-#if IS_ENABLED(CONFIG_MTK_CCU_DEBUG)
-{
-	return rproc_shutdownx(rproc, RPROC_UID_MAX+1);
-}
-
-int rproc_shutdownx(struct rproc *rproc, unsigned int uid)
-#endif
 {
 	struct device *dev = &rproc->dev;
 	int ret = 0;
@@ -2024,10 +1994,6 @@ int rproc_shutdownx(struct rproc *rproc, unsigned int uid)
 	ret = mutex_lock_interruptible(&rproc->lock);
 	if (ret) {
 		dev_err(dev, "can't lock rproc %s: %d\n", rproc->name, ret);
-#if IS_ENABLED(CONFIG_MTK_CCU_DEBUG)
-		if (uid < RPROC_UID_MAX)
-			atomic_inc(&(rproc->bootcnt[uid][3]));
-#endif
 		return ret;
 	}
 
@@ -2037,10 +2003,6 @@ int rproc_shutdownx(struct rproc *rproc, unsigned int uid)
 		goto out;
 	}
 
-#if IS_ENABLED(CONFIG_MTK_CCU_DEBUG)
-	if (uid < RPROC_UID_MAX)
-		atomic_dec(&(rproc->bootcnt[uid][0]));
-#endif
 	/* if the remote proc is still needed, bail out */
 	if (!atomic_dec_and_test(&rproc->power))
 		goto out;
@@ -2048,10 +2010,6 @@ int rproc_shutdownx(struct rproc *rproc, unsigned int uid)
 	ret = rproc_stop(rproc, false);
 	if (ret) {
 		atomic_inc(&rproc->power);
-#if IS_ENABLED(CONFIG_MTK_CCU_DEBUG)
-		if (uid < RPROC_UID_MAX)
-			atomic_inc(&(rproc->bootcnt[uid][4]));
-#endif
 		goto out;
 	}
 
@@ -2067,14 +2025,12 @@ int rproc_shutdownx(struct rproc *rproc, unsigned int uid)
 	kfree(rproc->cached_table);
 	rproc->cached_table = NULL;
 	rproc->table_ptr = NULL;
+	rproc->table_sz = 0;
 out:
 	mutex_unlock(&rproc->lock);
 	return ret;
 }
 EXPORT_SYMBOL(rproc_shutdown);
-#if IS_ENABLED(CONFIG_MTK_CCU_DEBUG)
-EXPORT_SYMBOL(rproc_shutdownx);
-#endif
 
 /**
  * rproc_detach() - Detach the remote processor from the
@@ -2511,6 +2467,13 @@ struct rproc *rproc_alloc(struct device *dev, const char *name,
 	rproc->dev.driver_data = rproc;
 	idr_init(&rproc->notifyids);
 
+	/* Assign a unique device index and name */
+	rproc->index = ida_alloc(&rproc_dev_index, GFP_KERNEL);
+	if (rproc->index < 0) {
+		dev_err(dev, "ida_alloc failed: %d\n", rproc->index);
+		goto put_device;
+	}
+
 	rproc->name = kstrdup_const(name, GFP_KERNEL);
 	if (!rproc->name)
 		goto put_device;
@@ -2520,13 +2483,6 @@ struct rproc *rproc_alloc(struct device *dev, const char *name,
 
 	if (rproc_alloc_ops(rproc, ops))
 		goto put_device;
-
-	/* Assign a unique device index and name */
-	rproc->index = ida_alloc(&rproc_dev_index, GFP_KERNEL);
-	if (rproc->index < 0) {
-		dev_err(dev, "ida_alloc failed: %d\n", rproc->index);
-		goto put_device;
-	}
 
 	dev_set_name(&rproc->dev, "remoteproc%d", rproc->index);
 

@@ -24,10 +24,6 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 
-#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
-#include <trace/events/mtk_fuse.h>
-#endif
-
 static bool __read_mostly allow_sys_admin_access;
 module_param(allow_sys_admin_access, bool, 0644);
 MODULE_PARM_DESC(allow_sys_admin_access,
@@ -196,7 +192,7 @@ static bool backing_data_changed(struct fuse_inode *fi, struct dentry *entry,
 	int err;
 	bool ret = true;
 
-	if (!entry) {
+	if (!entry || !fi->backing_inode) {
 		ret = false;
 		goto put_backing_file;
 	}
@@ -318,25 +314,14 @@ static int fuse_dentry_revalidate(struct dentry *entry, unsigned int flags)
 			    (bool) IS_AUTOMOUNT(inode) != (bool) (outarg.attr.flags & FUSE_ATTR_SUBMOUNT)) {
 				fuse_queue_forget(fm->fc, forget,
 						  outarg.nodeid, 1);
-#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
-				trace_mtk_fuse_queue_forget(__func__, __LINE__, outarg.nodeid, 1);
-#endif
 				goto invalid;
 			}
 			spin_lock(&fi->lock);
-#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
-			trace_mtk_fuse_nlookup(__func__, __LINE__, inode,
-					fi->nodeid, fi->nlookup, fi->nlookup + 1);
-#endif
 			fi->nlookup++;
 			spin_unlock(&fi->lock);
 		}
 		kfree(forget);
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 		if (ret == -ENOMEM || ret == -EINTR)
-#else
-		if (ret == -ENOMEM)
-#endif
 			goto out;
 		if (ret || fuse_invalid_attr(&outarg.attr) ||
 		    fuse_stale_inode(inode, outarg.generation, &outarg.attr))
@@ -379,17 +364,12 @@ static void fuse_dentry_release(struct dentry *dentry)
 {
 	struct fuse_dentry *fd = dentry->d_fsdata;
 
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 #ifdef CONFIG_FUSE_BPF
 	if (fd && fd->backing_path.dentry)
 		path_put(&fd->backing_path);
 
 	if (fd && fd->bpf)
 		bpf_prog_put(fd->bpf);
-#endif
-#else
-	if (fd && fd->backing_path.dentry)
-		path_put(&fd->backing_path);
 #endif
 
 	kfree_rcu(fd, rcu);
@@ -446,7 +426,12 @@ static int fuse_dentry_canonical_path(const struct path *path,
 
 #ifdef CONFIG_FUSE_BPF
 	struct fuse_err_ret fer;
+#endif
 
+	if (fm->fc->no_dentry_canonical_path)
+		goto out;
+
+#ifdef CONFIG_FUSE_BPF
 	fer = fuse_bpf_backing(inode, struct fuse_dummy_io,
 			       fuse_canonical_path_initialize,
 			       fuse_canonical_path_backing,
@@ -473,9 +458,13 @@ static int fuse_dentry_canonical_path(const struct path *path,
 	free_page((unsigned long)path_name);
 	if (err > 0)
 		return 0;
-	if (err < 0)
+	if (err < 0 && err != -ENOSYS)
 		return err;
 
+	if (err == -ENOSYS)
+		fm->fc->no_dentry_canonical_path = 1;
+
+out:
 	canonical_path->dentry = path->dentry;
 	canonical_path->mnt = path->mnt;
 	path_get(canonical_path);
@@ -529,7 +518,6 @@ int fuse_lookup_name(struct super_block *sb, u64 nodeid, const struct qstr *name
 	if (name->len > FUSE_NAME_MAX)
 		goto out;
 
-
 	forget = fuse_alloc_forget();
 	err = -ENOMEM;
 	if (!forget)
@@ -548,47 +536,26 @@ int fuse_lookup_name(struct super_block *sb, u64 nodeid, const struct qstr *name
 
 		err = -ENOENT;
 		if (!entry)
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 			goto out_put_forget;
-#else
-			goto out_queue_forget;
-#endif
 
 		err = -EINVAL;
 		backing_file = bpf_arg.backing_file;
 		if (!backing_file)
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 			goto out_put_forget;
-#else
-			goto out_queue_forget;
-#endif
 
 		if (IS_ERR(backing_file)) {
 			err = PTR_ERR(backing_file);
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 			goto out_put_forget;
-#else
-			goto out_queue_forget;
-#endif
 		}
 
 		backing_inode = backing_file->f_inode;
-#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
-		trace_mtk_fuse_iget_backing(__func__, __LINE__, NULL,
-				outarg->nodeid, backing_inode);
-#endif
 		*inode = fuse_iget_backing(sb, outarg->nodeid, backing_inode);
 		if (!*inode)
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 			goto out_put_forget;
-#else
-			goto out;
-#endif
 
 		err = fuse_handle_backing(&bpf_arg,
 				&get_fuse_inode(*inode)->backing_inode,
 				&get_fuse_dentry(entry)->backing_path);
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 		if (!err)
 			err = fuse_handle_bpf_prog(&bpf_arg, NULL,
 					   &get_fuse_inode(*inode)->bpf);
@@ -597,14 +564,6 @@ int fuse_lookup_name(struct super_block *sb, u64 nodeid, const struct qstr *name
 			*inode = NULL;
 			goto out_put_forget;
 		}
-#else
-		if (err)
-			goto out;
-
-		err = fuse_handle_bpf_prog(&bpf_arg, NULL, &get_fuse_inode(*inode)->bpf);
-		if (err)
-			goto out;
-#endif
 	} else
 #endif
 	{
@@ -617,6 +576,10 @@ int fuse_lookup_name(struct super_block *sb, u64 nodeid, const struct qstr *name
 			goto out_put_forget;
 		if (fuse_invalid_attr(&outarg->attr))
 			goto out_put_forget;
+		if (outarg->nodeid == FUSE_ROOT_ID && outarg->generation != 0) {
+			pr_warn_once("root generation should be zero\n");
+			outarg->generation = 0;
+		}
 
 		*inode = fuse_iget(sb, outarg->nodeid, outarg->generation,
 				   &outarg->attr, entry_attr_timeout(outarg),
@@ -624,16 +587,8 @@ int fuse_lookup_name(struct super_block *sb, u64 nodeid, const struct qstr *name
 	}
 
 	err = -ENOMEM;
-#if !IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
-#ifdef CONFIG_FUSE_BPF
-out_queue_forget:
-#endif
-#endif
 	if (!*inode && outarg->nodeid) {
 		fuse_queue_forget(fm->fc, forget, outarg->nodeid, 1);
-#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
-		trace_mtk_fuse_queue_forget(__func__, __LINE__, outarg->nodeid, 1);
-#endif
 		goto out;
 	}
 	err = 0;
@@ -707,7 +662,7 @@ static struct dentry *fuse_lookup(struct inode *dir, struct dentry *entry,
 }
 
 static int get_security_context(struct dentry *entry, umode_t mode,
-				void **security_ctx, u32 *security_ctxlen)
+				struct fuse_in_arg *ext)
 {
 	struct fuse_secctx *fctx;
 	struct fuse_secctx_header *header;
@@ -754,12 +709,40 @@ static int get_security_context(struct dentry *entry, umode_t mode,
 
 		memcpy(ptr, ctx, ctxlen);
 	}
-	*security_ctxlen = total_len;
-	*security_ctx = header;
+	ext->size = total_len;
+	ext->value = header;
 	err = 0;
 out_err:
 	kfree(ctx);
 	return err;
+}
+
+static int get_create_ext(struct fuse_args *args, struct dentry *dentry,
+			  umode_t mode)
+{
+	struct fuse_conn *fc = get_fuse_conn_super(dentry->d_sb);
+	struct fuse_in_arg ext = { .size = 0, .value = NULL };
+	int err = 0;
+
+	if (fc->init_security)
+		err = get_security_context(dentry, mode, &ext);
+
+	if (!err && ext.size) {
+		WARN_ON(args->in_numargs >= ARRAY_SIZE(args->in_args));
+		args->is_ext = true;
+		args->ext_idx = args->in_numargs++;
+		args->in_args[args->ext_idx] = ext;
+	} else {
+		kfree(ext.value);
+	}
+
+	return err;
+}
+
+static void free_ext_value(struct fuse_args *args)
+{
+	if (args->is_ext)
+		kfree(args->in_args[args->ext_idx].value);
 }
 
 /*
@@ -783,8 +766,6 @@ static int fuse_create_open(struct inode *dir, struct dentry *entry,
 	struct fuse_entry_out outentry;
 	struct fuse_inode *fi;
 	struct fuse_file *ff;
-	void *security_ctx = NULL;
-	u32 security_ctxlen;
 	bool trunc = flags & O_TRUNC;
 
 	/* Userspace expects S_IFREG in create mode */
@@ -842,19 +823,12 @@ static int fuse_create_open(struct inode *dir, struct dentry *entry,
 	args.out_args[1].size = sizeof(outopen);
 	args.out_args[1].value = &outopen;
 
-	if (fm->fc->init_security) {
-		err = get_security_context(entry, mode, &security_ctx,
-					   &security_ctxlen);
-		if (err)
-			goto out_put_forget_req;
-
-		args.in_numargs = 3;
-		args.in_args[2].size = security_ctxlen;
-		args.in_args[2].value = security_ctx;
-	}
+	err = get_create_ext(&args, entry, mode);
+	if (err)
+		goto out_free_ff;
 
 	err = fuse_simple_request(fm, &args);
-	kfree(security_ctx);
+	free_ext_value(&args);
 	if (err)
 		goto out_free_ff;
 
@@ -873,9 +847,6 @@ static int fuse_create_open(struct inode *dir, struct dentry *entry,
 		flags &= ~(O_CREAT | O_EXCL | O_TRUNC);
 		fuse_sync_release(NULL, ff, flags);
 		fuse_queue_forget(fm->fc, forget, outentry.nodeid, 1);
-#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
-		trace_mtk_fuse_queue_forget(__func__, __LINE__, outentry.nodeid, 1);
-#endif
 		err = -ENOMEM;
 		goto out_err;
 	}
@@ -965,8 +936,6 @@ static int create_new_entry(struct fuse_mount *fm, struct fuse_args *args,
 	struct dentry *d;
 	int err;
 	struct fuse_forget_link *forget;
-	void *security_ctx = NULL;
-	u32 security_ctxlen;
 
 	if (fuse_is_bad(dir))
 		return -EIO;
@@ -981,21 +950,14 @@ static int create_new_entry(struct fuse_mount *fm, struct fuse_args *args,
 	args->out_args[0].size = sizeof(outarg);
 	args->out_args[0].value = &outarg;
 
-	if (fm->fc->init_security && args->opcode != FUSE_LINK) {
-		err = get_security_context(entry, mode, &security_ctx,
-					   &security_ctxlen);
+	if (args->opcode != FUSE_LINK) {
+		err = get_create_ext(args, entry, mode);
 		if (err)
 			goto out_put_forget_req;
-
-		BUG_ON(args->in_numargs != 2);
-
-		args->in_numargs = 3;
-		args->in_args[2].size = security_ctxlen;
-		args->in_args[2].value = security_ctx;
 	}
 
 	err = fuse_simple_request(fm, args);
-	kfree(security_ctx);
+	free_ext_value(args);
 	if (err)
 		goto out_put_forget_req;
 
@@ -1010,9 +972,6 @@ static int create_new_entry(struct fuse_mount *fm, struct fuse_args *args,
 			  &outarg.attr, entry_attr_timeout(&outarg), 0);
 	if (!inode) {
 		fuse_queue_forget(fm->fc, forget, outarg.nodeid, 1);
-#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
-		trace_mtk_fuse_queue_forget(__func__, __LINE__, outarg.nodeid, 1);
-#endif
 		return -ENOMEM;
 	}
 	kfree(forget);
@@ -1411,6 +1370,8 @@ static int fuse_link(struct dentry *entry, struct inode *newdir,
 	else if (err == -EINTR)
 		fuse_invalidate_attr(inode);
 
+	if (err == -ENOSYS)
+		err = -EPERM;
 	return err;
 }
 
@@ -1530,7 +1491,7 @@ int fuse_update_attributes(struct inode *inode, struct file *file, u32 mask)
 }
 
 int fuse_reverse_inval_entry(struct fuse_conn *fc, u64 parent_nodeid,
-			     u64 child_nodeid, struct qstr *name)
+			     u64 child_nodeid, struct qstr *name, u32 flags)
 {
 	int err = -ENOTDIR;
 	struct inode *parent;
@@ -1557,7 +1518,9 @@ int fuse_reverse_inval_entry(struct fuse_conn *fc, u64 parent_nodeid,
 		goto unlock;
 
 	fuse_dir_changed(parent);
-	fuse_invalidate_entry(entry);
+	if (!(flags & FUSE_EXPIRE_ONLY))
+		d_invalidate(entry);
+	fuse_invalidate_entry_cache(entry);
 
 	if (child_nodeid != 0 && d_really_is_positive(entry)) {
 		inode_lock(d_inode(entry));
@@ -1825,7 +1788,7 @@ static const char *fuse_get_link(struct dentry *dentry, struct inode *inode,
 #endif
 
 	if (fc->cache_symlinks)
-		return page_get_link(dentry, inode, callback);
+		return page_get_link_raw(dentry, inode, callback);
 
 	err = -ECHILD;
 	if (!dentry)
@@ -2062,7 +2025,7 @@ int fuse_do_setattr(struct dentry *dentry, struct iattr *attr,
 	if (FUSE_IS_DAX(inode) && is_truncate) {
 		filemap_invalidate_lock(mapping);
 		fault_blocked = true;
-		err = fuse_dax_break_layouts(inode, 0, 0);
+		err = fuse_dax_break_layouts(inode, 0, -1);
 		if (err) {
 			filemap_invalidate_unlock(mapping);
 			return err;

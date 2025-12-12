@@ -166,9 +166,12 @@ again:
 			klm->bcount = cpu_to_be32(klm_bcount(dmr->end - dmr->start));
 			preve = dmr->end;
 		} else {
+			u64 bcount = min_t(u64, dmr->start - preve, MAX_KLM_SIZE);
+
 			klm->key = cpu_to_be32(mvdev->res.null_mkey);
-			klm->bcount = cpu_to_be32(klm_bcount(dmr->start - preve));
-			preve = dmr->start;
+			klm->bcount = cpu_to_be32(klm_bcount(bcount));
+			preve += bcount;
+
 			goto again;
 		}
 	}
@@ -227,21 +230,19 @@ static int map_direct_mr(struct mlx5_vdpa_dev *mvdev, struct mlx5_vdpa_direct_mr
 	unsigned long lgcd = 0;
 	int log_entity_size;
 	unsigned long size;
-	u64 start = 0;
 	int err;
 	struct page *pg;
 	unsigned int nsg;
 	int sglen;
-	u64 pa;
+	u64 pa, offset;
 	u64 paend;
 	struct scatterlist *sg;
 	struct device *dma = mvdev->vdev.dma_dev;
 
 	for (map = vhost_iotlb_itree_first(iotlb, mr->start, mr->end - 1);
-	     map; map = vhost_iotlb_itree_next(map, start, mr->end - 1)) {
+	     map; map = vhost_iotlb_itree_next(map, mr->start, mr->end - 1)) {
 		size = maplen(map, mr);
 		lgcd = gcd(lgcd, size);
-		start += size;
 	}
 	log_entity_size = ilog2(lgcd);
 
@@ -255,8 +256,10 @@ static int map_direct_mr(struct mlx5_vdpa_dev *mvdev, struct mlx5_vdpa_direct_mr
 	sg = mr->sg_head.sgl;
 	for (map = vhost_iotlb_itree_first(iotlb, mr->start, mr->end - 1);
 	     map; map = vhost_iotlb_itree_next(map, mr->start, mr->end - 1)) {
-		paend = map->addr + maplen(map, mr);
-		for (pa = map->addr; pa < paend; pa += sglen) {
+		offset = mr->start > map->start ? mr->start - map->start : 0;
+		pa = map->addr + offset;
+		paend = map->addr + offset + maplen(map, mr);
+		for (; pa < paend; pa += sglen) {
 			pg = pfn_to_page(__phys_to_pfn(pa));
 			if (!sg) {
 				mlx5_vdpa_warn(mvdev, "sg null. start 0x%llx, end 0x%llx\n",
@@ -491,15 +494,24 @@ static void destroy_user_mr(struct mlx5_vdpa_dev *mvdev, struct mlx5_vdpa_mr *mr
 	}
 }
 
-void mlx5_vdpa_destroy_mr(struct mlx5_vdpa_dev *mvdev)
+static void _mlx5_vdpa_destroy_cvq_mr(struct mlx5_vdpa_dev *mvdev, unsigned int asid)
+{
+	if (mvdev->group2asid[MLX5_VDPA_CVQ_GROUP] != asid)
+		return;
+
+	prune_iotlb(mvdev);
+}
+
+static void _mlx5_vdpa_destroy_dvq_mr(struct mlx5_vdpa_dev *mvdev, unsigned int asid)
 {
 	struct mlx5_vdpa_mr *mr = &mvdev->mr;
 
-	mutex_lock(&mr->mkey_mtx);
-	if (!mr->initialized)
-		goto out;
+	if (mvdev->group2asid[MLX5_VDPA_DATAVQ_GROUP] != asid)
+		return;
 
-	prune_iotlb(mvdev);
+	if (!mr->initialized)
+		return;
+
 	if (mr->user_mr)
 		destroy_user_mr(mvdev, mr);
 	else
@@ -507,45 +519,79 @@ void mlx5_vdpa_destroy_mr(struct mlx5_vdpa_dev *mvdev)
 
 	memset(mr, 0, sizeof(*mr));
 	mr->initialized = false;
-out:
+}
+
+void mlx5_vdpa_destroy_mr_asid(struct mlx5_vdpa_dev *mvdev, unsigned int asid)
+{
+	struct mlx5_vdpa_mr *mr = &mvdev->mr;
+
+	mutex_lock(&mr->mkey_mtx);
+
+	_mlx5_vdpa_destroy_dvq_mr(mvdev, asid);
+	_mlx5_vdpa_destroy_cvq_mr(mvdev, asid);
+
 	mutex_unlock(&mr->mkey_mtx);
+}
+
+void mlx5_vdpa_destroy_mr(struct mlx5_vdpa_dev *mvdev)
+{
+	mlx5_vdpa_destroy_mr_asid(mvdev, mvdev->group2asid[MLX5_VDPA_CVQ_GROUP]);
+	mlx5_vdpa_destroy_mr_asid(mvdev, mvdev->group2asid[MLX5_VDPA_DATAVQ_GROUP]);
+}
+
+static int _mlx5_vdpa_create_cvq_mr(struct mlx5_vdpa_dev *mvdev,
+				    struct vhost_iotlb *iotlb,
+				    unsigned int asid)
+{
+	if (mvdev->group2asid[MLX5_VDPA_CVQ_GROUP] != asid)
+		return 0;
+
+	return dup_iotlb(mvdev, iotlb);
+}
+
+static int _mlx5_vdpa_create_dvq_mr(struct mlx5_vdpa_dev *mvdev,
+				    struct vhost_iotlb *iotlb,
+				    unsigned int asid)
+{
+	struct mlx5_vdpa_mr *mr = &mvdev->mr;
+	int err;
+
+	if (mvdev->group2asid[MLX5_VDPA_DATAVQ_GROUP] != asid)
+		return 0;
+
+	if (mr->initialized)
+		return 0;
+
+	if (iotlb)
+		err = create_user_mr(mvdev, iotlb);
+	else
+		err = create_dma_mr(mvdev, mr);
+
+	if (err)
+		return err;
+
+	mr->initialized = true;
+
+	return 0;
 }
 
 static int _mlx5_vdpa_create_mr(struct mlx5_vdpa_dev *mvdev,
 				struct vhost_iotlb *iotlb, unsigned int asid)
 {
-	struct mlx5_vdpa_mr *mr = &mvdev->mr;
 	int err;
 
-	if (mr->initialized)
-		return 0;
+	err = _mlx5_vdpa_create_dvq_mr(mvdev, iotlb, asid);
+	if (err)
+		return err;
 
-	if (mvdev->group2asid[MLX5_VDPA_DATAVQ_GROUP] == asid) {
-		if (iotlb)
-			err = create_user_mr(mvdev, iotlb);
-		else
-			err = create_dma_mr(mvdev, mr);
+	err = _mlx5_vdpa_create_cvq_mr(mvdev, iotlb, asid);
+	if (err)
+		goto out_err;
 
-		if (err)
-			return err;
-	}
-
-	if (mvdev->group2asid[MLX5_VDPA_CVQ_GROUP] == asid) {
-		err = dup_iotlb(mvdev, iotlb);
-		if (err)
-			goto out_err;
-	}
-
-	mr->initialized = true;
 	return 0;
 
 out_err:
-	if (mvdev->group2asid[MLX5_VDPA_DATAVQ_GROUP] == asid) {
-		if (iotlb)
-			destroy_user_mr(mvdev, mr);
-		else
-			destroy_dma_mr(mvdev, mr);
-	}
+	_mlx5_vdpa_destroy_dvq_mr(mvdev, asid);
 
 	return err;
 }

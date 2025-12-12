@@ -38,6 +38,7 @@
 #include <linux/sched/deadline.h>
 #include <linux/sched/nohz.h>
 #include <linux/sched/debug.h>
+#include <linux/sched/isolation.h>
 #include <linux/timer.h>
 #include <linux/freezer.h>
 #include <linux/compat.h>
@@ -47,9 +48,7 @@
 #include <trace/events/timer.h>
 
 #include "tick-internal.h"
-#if IS_ENABLED(CONFIG_MTK_IRQ_MONITOR_DEBUG)
-#include <linux/sched/clock.h>
-#endif
+
 /*
  * Masks for selecting the soft and hard context timers from
  * cpu_base->active
@@ -145,11 +144,6 @@ static struct hrtimer_cpu_base migration_cpu_base = {
 };
 
 #define migration_base	migration_cpu_base.clock_base[0]
-
-static inline bool is_migration_base(struct hrtimer_clock_base *base)
-{
-	return base == &migration_base;
-}
 
 /*
  * We are using hashed locking: holding per_cpu(hrtimer_bases)[n].lock
@@ -274,11 +268,6 @@ again:
 }
 
 #else /* CONFIG_SMP */
-
-static inline bool is_migration_base(struct hrtimer_clock_base *base)
-{
-	return false;
-}
 
 static inline struct hrtimer_clock_base *
 lock_hrtimer_base(const struct hrtimer *timer, unsigned long *flags)
@@ -1285,6 +1274,8 @@ void hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim,
 	struct hrtimer_clock_base *base;
 	unsigned long flags;
 
+	if (WARN_ON_ONCE(!timer->function))
+		return;
 	/*
 	 * Check whether the HRTIMER_MODE_SOFT bit and hrtimer.is_soft
 	 * match on CONFIG_PREEMPT_RT = n. With PREEMPT_RT check the hard
@@ -1375,6 +1366,18 @@ static void hrtimer_sync_wait_running(struct hrtimer_cpu_base *cpu_base,
 		raw_spin_lock_irq(&cpu_base->lock);
 	}
 }
+
+#ifdef CONFIG_SMP
+static __always_inline bool is_migration_base(struct hrtimer_clock_base *base)
+{
+	return base == &migration_base;
+}
+#else
+static __always_inline bool is_migration_base(struct hrtimer_clock_base *base)
+{
+	return false;
+}
+#endif
 
 /*
  * This function is called on PREEMPT_RT kernels when the fast path
@@ -1649,9 +1652,6 @@ static void __run_hrtimer(struct hrtimer_cpu_base *cpu_base,
 	enum hrtimer_restart (*fn)(struct hrtimer *);
 	bool expires_in_hardirq;
 	int restart;
-#if IS_ENABLED(CONFIG_MTK_IRQ_MONITOR_DEBUG)
-	u64 start, end, process_time;
-#endif
 
 	lockdep_assert_held(&cpu_base->lock);
 
@@ -1686,17 +1686,9 @@ static void __run_hrtimer(struct hrtimer_cpu_base *cpu_base,
 	raw_spin_unlock_irqrestore(&cpu_base->lock, flags);
 	trace_hrtimer_expire_entry(timer, now);
 	expires_in_hardirq = lockdep_hrtimer_enter(timer);
-#if IS_ENABLED(CONFIG_MTK_IRQ_MONITOR_DEBUG)
-	start = sched_clock();
-#endif
+
 	restart = fn(timer);
-#if IS_ENABLED(CONFIG_MTK_IRQ_MONITOR_DEBUG)
-	end = sched_clock();
-	process_time = end - start;
-	if (process_time > 5000000L) // > 5ms
-		pr_notice("irq_monitor: function: %pS time: %lld func: %s line: %d "
-			, fn, process_time, __func__, __LINE__);
-#endif
+
 	lockdep_hrtimer_exit(expires_in_hardirq);
 	trace_hrtimer_expire_exit(timer);
 	raw_spin_lock_irq(&cpu_base->lock);
@@ -2099,14 +2091,9 @@ long hrtimer_nanosleep(ktime_t rqtp, const enum hrtimer_mode mode,
 	struct restart_block *restart;
 	struct hrtimer_sleeper t;
 	int ret = 0;
-	u64 slack;
-
-	slack = current->timer_slack_ns;
-	if (dl_task(current) || rt_task(current))
-		slack = 0;
 
 	hrtimer_init_sleeper_on_stack(&t, clockid, mode);
-	hrtimer_set_expires_range_ns(&t.timer, rqtp, slack);
+	hrtimer_set_expires_range_ns(&t.timer, rqtp, current->timer_slack_ns);
 	ret = do_nanosleep(&t, mode);
 	if (ret != -ERESTART_RESTARTBLOCK)
 		goto out;
@@ -2339,7 +2326,8 @@ EXPORT_SYMBOL_GPL(schedule_hrtimeout_range_clock);
  * the current task state has been set (see set_current_state()).
  *
  * The @delta argument gives the kernel the freedom to schedule the
- * actual wakeup to a time that is both power and performance friendly.
+ * actual wakeup to a time that is both power and performance friendly
+ * for regular (non RT/DL) tasks.
  * The kernel give the normal best effort behavior for "@expires+@delta",
  * but may decide to fire the timer earlier, but no earlier than @expires.
  *

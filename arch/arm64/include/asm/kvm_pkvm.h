@@ -110,12 +110,14 @@ void pkvm_host_reclaim_page(struct kvm *host_kvm, phys_addr_t ipa);
  * - Distinction between Secure and Non-secure Memory
  * - Mixed-endian at EL0 only
  * - Non-context synchronizing exception entry and exit
+ * - 16Kb stage-1 granule support
  */
 #define PVM_ID_AA64MMFR0_ALLOW (\
 	ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_BIGEND) | \
 	ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_SNSMEM) | \
 	ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_BIGENDEL0) | \
-	ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_EXS) \
+	ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_EXS) | \
+	ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_TGRAN16) \
 	)
 
 /*
@@ -342,11 +344,16 @@ static inline unsigned long __hyp_pgtable_moveable_regs_pages(void)
 
 #define __PKVM_PRIVATE_SZ SZ_1G
 
+extern u64 kvm_nvhe_sym(hyp_lm_size_mb);
+
 static inline unsigned long hyp_s1_pgtable_pages(void)
 {
 	unsigned long res;
 
-	res = __hyp_pgtable_moveable_regs_pages();
+	if (!kvm_nvhe_sym(hyp_lm_size_mb))
+		res = __hyp_pgtable_moveable_regs_pages();
+	else
+		res = __hyp_pgtable_max_pages(kvm_nvhe_sym(hyp_lm_size_mb) * SZ_1M / PAGE_SIZE);
 
 	res += __hyp_pgtable_max_pages(__PKVM_PRIVATE_SZ >> PAGE_SHIFT);
 
@@ -412,12 +419,6 @@ static inline size_t pkvm_host_fp_state_size(void)
 		       SVE_SIG_REGS_SIZE(sve_vq_from_vl(kvm_host_sve_max_vl)));
 	else
 		return sizeof(struct user_fpsimd_state);
-}
-
-static inline unsigned long hyp_host_fp_pages(unsigned long nr_cpus)
-{
-	return PAGE_ALIGN(size_mul(nr_cpus, pkvm_host_fp_state_size())) >>
-		PAGE_SHIFT;
 }
 
 #endif	/* __ARM64_KVM_PKVM_H__ */

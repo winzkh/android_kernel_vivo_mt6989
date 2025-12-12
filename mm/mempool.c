@@ -19,6 +19,8 @@
 #include <linux/mempool.h>
 #include <linux/writeback.h>
 #include "slab.h"
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/mm.h>
 
 #if defined(CONFIG_DEBUG_SLAB) || defined(CONFIG_SLUB_DEBUG_ON)
 static void poison_error(mempool_t *pool, void *element, size_t size,
@@ -36,9 +38,6 @@ static void poison_error(mempool_t *pool, void *element, size_t size,
 		pr_cont("%x ", *(u8 *)(element + i));
 	pr_cont("%s\n", end < size ? "..." : "");
 	dump_stack();
-#if IS_ENABLED(CONFIG_MTK_PANIC_ON_WARN)
-	BUG();
-#endif
 }
 
 static void __check_element(mempool_t *pool, void *element, size_t size)
@@ -380,6 +379,7 @@ void *mempool_alloc(mempool_t *pool, gfp_t gfp_mask)
 	unsigned long flags;
 	wait_queue_entry_t wait;
 	gfp_t gfp_temp;
+	bool skip_wait = false;
 
 	VM_WARN_ON_ONCE(gfp_mask & __GFP_ZERO);
 	might_alloc(gfp_mask);
@@ -424,6 +424,11 @@ repeat_alloc:
 	if (!(gfp_mask & __GFP_DIRECT_RECLAIM)) {
 		spin_unlock_irqrestore(&pool->lock, flags);
 		return NULL;
+	}
+	trace_android_vh_mempool_alloc_skip_wait(&gfp_temp, &skip_wait);
+	if (skip_wait) {
+		spin_unlock_irqrestore(&pool->lock, flags);
+		goto repeat_alloc;
 	}
 
 	/* Let's wait for someone else to return an element to @pool */

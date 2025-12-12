@@ -616,7 +616,7 @@ static void use_dmio(struct dm_buffer *b, enum req_op op, sector_t sector,
 		io_req.mem.ptr.vma = (char *)b->data + offset;
 	}
 
-	r = dm_io(&io_req, 1, &region, NULL);
+	r = dm_io(&io_req, 1, &region, NULL, IOPRIO_DEFAULT);
 	if (unlikely(r))
 		b->end_io(b, errno_to_blk_status(r));
 }
@@ -1117,12 +1117,7 @@ static void *new_read(struct dm_bufio_client *c, sector_t block,
 	if (need_submit)
 		submit_io(b, REQ_OP_READ, read_endio);
 
-#if IS_ENABLED(CONFIG_MTK_F2FS_DEBUG)
-	BUG_ON(wait_on_bit_timeout(&b->state, B_READING,
-		TASK_UNINTERRUPTIBLE, msecs_to_jiffies(30000)) != 0);
-#else /* #if IS_ENABLED(CONFIG_MTK_F2FS_DEBUG) */
 	wait_on_bit_io(&b->state, B_READING, TASK_UNINTERRUPTIBLE);
-#endif /* #if IS_ENABLED(CONFIG_MTK_F2FS_DEBUG) */
 
 	if (b->read_error) {
 		int error = blk_status_to_errno(b->read_error);
@@ -1382,7 +1377,7 @@ int dm_bufio_issue_flush(struct dm_bufio_client *c)
 
 	BUG_ON(dm_bufio_in_request());
 
-	return dm_io(&io_req, 1, &io_reg, NULL);
+	return dm_io(&io_req, 1, &io_reg, NULL, IOPRIO_DEFAULT);
 }
 EXPORT_SYMBOL_GPL(dm_bufio_issue_flush);
 
@@ -1405,7 +1400,7 @@ int dm_bufio_issue_discard(struct dm_bufio_client *c, sector_t block, sector_t c
 
 	BUG_ON(dm_bufio_in_request());
 
-	return dm_io(&io_req, 1, &io_reg, NULL);
+	return dm_io(&io_req, 1, &io_reg, NULL, IOPRIO_DEFAULT);
 }
 EXPORT_SYMBOL_GPL(dm_bufio_issue_discard);
 
@@ -1692,7 +1687,8 @@ static void __scan(struct dm_bufio_client *c)
 				atomic_long_dec(&c->need_shrink);
 				freed++;
 			}
-			cond_resched();
+			if (!(static_branch_unlikely(&no_sleep_enabled) && c->no_sleep))
+				cond_resched();
 		}
 	}
 }
@@ -1927,6 +1923,13 @@ void dm_bufio_client_destroy(struct dm_bufio_client *c)
 	kfree(c);
 }
 EXPORT_SYMBOL_GPL(dm_bufio_client_destroy);
+
+void dm_bufio_client_reset(struct dm_bufio_client *c)
+{
+	drop_buffers(c);
+	flush_work(&c->shrink_work);
+}
+EXPORT_SYMBOL_GPL(dm_bufio_client_reset);
 
 void dm_bufio_set_sector_offset(struct dm_bufio_client *c, sector_t start)
 {

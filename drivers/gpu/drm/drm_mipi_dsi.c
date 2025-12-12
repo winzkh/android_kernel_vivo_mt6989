@@ -209,7 +209,7 @@ mipi_dsi_device_register_full(struct mipi_dsi_host *host,
 		return ERR_PTR(-EINVAL);
 	}
 
-	if (info->channel > 4) {
+	if (info->channel > 3) {
 		drm_err(host, "invalid virtual channel: %u\n", info->channel);
 		return ERR_PTR(-EINVAL);
 	}
@@ -221,7 +221,7 @@ mipi_dsi_device_register_full(struct mipi_dsi_host *host,
 		return dsi;
 	}
 
-	dsi->dev.of_node = info->node;
+	device_set_node(&dsi->dev, of_fwnode_handle(info->node));
 	dsi->channel = info->channel;
 	strlcpy(dsi->name, info->type, sizeof(dsi->name));
 

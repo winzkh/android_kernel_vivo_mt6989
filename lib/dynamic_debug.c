@@ -301,7 +301,11 @@ static int ddebug_tokenize(char *buf, char *words[], int maxwords)
 		} else {
 			for (end = buf; *end && !isspace(*end); end++)
 				;
-			BUG_ON(end == buf);
+			if (end == buf) {
+				pr_err("parse err after word:%d=%s\n", nwords,
+				       nwords ? words[nwords - 1] : "<none>");
+				return -EINVAL;
+			}
 		}
 
 		/* `buf' is start of word, `end' is one past its end */
@@ -853,13 +857,7 @@ static inline char *dynamic_emit_prefix(struct _ddebug *desc, char *buf)
 		return __dynamic_emit_prefix(desc, buf);
 	return buf;
 }
-#if defined(CONFIG_MTK_PRINTK_DEBUG)
-void __dynamic_no_printk(struct _ddebug *descriptor, const char *fmt, ...)
-{
 
-}
-EXPORT_SYMBOL(__dynamic_no_printk);
-#endif
 void __dynamic_pr_debug(struct _ddebug *descriptor, const char *fmt, ...)
 {
 	va_list args;

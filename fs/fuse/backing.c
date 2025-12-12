@@ -12,9 +12,6 @@
 #include <linux/namei.h>
 
 #include "../internal.h"
-#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
-#include <trace/events/mtk_fuse.h>
-#endif
 
 #define FUSE_BPF_IOCB_MASK (IOCB_APPEND | IOCB_DSYNC | IOCB_HIPRI | IOCB_NOWAIT | IOCB_SYNC)
 
@@ -211,9 +208,7 @@ int fuse_create_open_backing(
 		struct file *file, unsigned int flags, umode_t mode)
 {
 	struct fuse_inode *dir_fuse_inode = get_fuse_inode(dir);
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 	struct fuse_dentry *fuse_entry = get_fuse_dentry(entry);
-#endif
 	struct fuse_dentry *dir_fuse_dentry = get_fuse_dentry(entry->d_parent);
 	struct dentry *backing_dentry = NULL;
 	struct inode *inode = NULL;
@@ -245,54 +240,28 @@ int fuse_create_open_backing(
 	if (err)
 		goto out;
 
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 	if (fuse_entry->backing_path.dentry)
 		path_put(&fuse_entry->backing_path);
 	fuse_entry->backing_path = (struct path) {
-#else
-	if (get_fuse_dentry(entry)->backing_path.dentry)
-		path_put(&get_fuse_dentry(entry)->backing_path);
-	get_fuse_dentry(entry)->backing_path = (struct path) {
-#endif
 		.mnt = dir_fuse_dentry->backing_path.mnt,
 		.dentry = backing_dentry,
 	};
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 	path_get(&fuse_entry->backing_path);
-#else
-	path_get(&get_fuse_dentry(entry)->backing_path);
-#endif
 
 	if (d_inode)
 		target_nodeid = get_fuse_inode(d_inode)->nodeid;
 
-#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
-	trace_mtk_fuse_iget_backing(__func__, __LINE__, d_inode, target_nodeid,
-			fuse_entry->backing_path.dentry->d_inode);
-#endif
 	inode = fuse_iget_backing(dir->i_sb, target_nodeid,
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 			fuse_entry->backing_path.dentry->d_inode);
 	if (!inode) {
 		err = -EIO;
-#else
-			get_fuse_dentry(entry)->backing_path.dentry->d_inode);
-	if (IS_ERR(inode)) {
-		err = PTR_ERR(inode);
-#endif
 		goto out;
 	}
 
 	if (get_fuse_inode(inode)->bpf)
 		bpf_prog_put(get_fuse_inode(inode)->bpf);
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 	get_fuse_inode(inode)->bpf = fuse_entry->bpf;
 	fuse_entry->bpf = NULL;
-#else
-	get_fuse_inode(inode)->bpf = dir_fuse_inode->bpf;
-	if (get_fuse_inode(inode)->bpf)
-		bpf_prog_inc(dir_fuse_inode->bpf);
-#endif
 
 	newent = d_splice_alias(inode, entry);
 	if (IS_ERR(newent)) {
@@ -300,16 +269,12 @@ int fuse_create_open_backing(
 		goto out;
 	}
 
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 	inode = NULL;
-#endif
 	entry = newent ? newent : entry;
 	err = finish_open(file, entry, fuse_open_file_backing);
 
 out:
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 	iput(inode);
-#endif
 	dput(backing_dentry);
 	return err;
 }
@@ -335,7 +300,9 @@ int fuse_release_initialize(struct fuse_bpf_args *fa, struct fuse_release_in *fr
 			    struct inode *inode, struct fuse_file *ff)
 {
 	/* Always put backing file whatever bpf/userspace says */
-	fput(ff->backing_file);
+	if (ff->backing_file) {
+	    fput(ff->backing_file);
+	}
 
 	*fri = (struct fuse_release_in) {
 		.fh = ff->fh,
@@ -434,23 +401,26 @@ int fuse_lseek_backing(struct fuse_bpf_args *fa, struct file *file, loff_t offse
 	struct file *backing_file = fuse_file->backing_file;
 	loff_t ret;
 
-	/* TODO: Handle changing of the file handle */
 	if (offset == 0) {
 		if (whence == SEEK_CUR) {
 			flo->offset = file->f_pos;
-			return flo->offset;
+			return 0;
 		}
 
 		if (whence == SEEK_SET) {
 			flo->offset = vfs_setpos(file, 0, 0);
-			return flo->offset;
+			return 0;
 		}
 	}
 
 	inode_lock(file->f_inode);
 	backing_file->f_pos = file->f_pos;
 	ret = vfs_llseek(backing_file, fli->offset, fli->whence);
-	flo->offset = ret;
+
+	if (!IS_ERR(ERR_PTR(ret))) {
+		flo->offset = ret;
+		ret = 0;
+	}
 	inode_unlock(file->f_inode);
 	return ret;
 }
@@ -1003,7 +973,6 @@ void *fuse_file_write_iter_finalize(struct fuse_bpf_args *fa,
 	return ERR_PTR(fwio->ret);
 }
 
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 long fuse_backing_ioctl(struct file *file, unsigned int command, unsigned long arg, int flags)
 {
 	struct fuse_file *ff = file->private_data;
@@ -1016,7 +985,6 @@ long fuse_backing_ioctl(struct file *file, unsigned int command, unsigned long a
 
 	return ret;
 }
-#endif
 
 int fuse_file_flock_backing(struct file *file, int cmd, struct file_lock *fl)
 {
@@ -1152,7 +1120,6 @@ int fuse_lookup_backing(struct fuse_bpf_args *fa, struct inode *dir,
 	struct kstat stat;
 	int err;
 
-	/* TODO this will not handle lookups over mount points */
 	inode_lock_nested(dir_backing_inode, I_MUTEX_PARENT);
 	backing_entry = lookup_one_len(entry->d_name.name, dir_backing_entry,
 					strlen(entry->d_name.name));
@@ -1171,16 +1138,22 @@ int fuse_lookup_backing(struct fuse_bpf_args *fa, struct inode *dir,
 		return 0;
 	}
 
+	err = follow_down(&fuse_entry->backing_path);
+	if (err)
+		goto err_out;
+
 	err = vfs_getattr(&fuse_entry->backing_path, &stat,
 				  STATX_BASIC_STATS, 0);
-	if (err) {
-		path_put_init(&fuse_entry->backing_path);
-		return err;
-	}
+	if (err)
+		goto err_out;
 
 	fuse_stat_to_attr(get_fuse_conn(dir),
 			  backing_entry->d_inode, &stat, &feo->attr);
 	return 0;
+
+err_out:
+	path_put_init(&fuse_entry->backing_path);
+	return err;
 }
 
 int fuse_handle_backing(struct fuse_entry_bpf *feb, struct inode **backing_inode,
@@ -1277,107 +1250,46 @@ int fuse_handle_bpf_prog(struct fuse_entry_bpf *feb, struct inode *parent,
 struct dentry *fuse_lookup_finalize(struct fuse_bpf_args *fa, struct inode *dir,
 			   struct dentry *entry, unsigned int flags)
 {
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 	struct fuse_dentry *fuse_entry;
 	struct dentry *backing_entry;
 	struct inode *inode = NULL, *backing_inode;
 	struct inode *entry_inode = entry->d_inode;
-#else
-	struct fuse_dentry *fd;
-	struct dentry *bd;
-	struct inode *inode, *backing_inode;
-	struct inode *d_inode = entry->d_inode;
-#endif
 	struct fuse_entry_out *feo = fa->out_args[0].value;
 	struct fuse_entry_bpf_out *febo = fa->out_args[1].value;
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 	struct fuse_entry_bpf *feb = container_of(febo, struct fuse_entry_bpf,
 						  out);
-
-#else
-	struct fuse_entry_bpf *feb = container_of(febo, struct fuse_entry_bpf, out);
-#endif
 	int error = -1;
 	u64 target_nodeid = 0;
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 	struct dentry *ret = NULL;
-#else
-	struct dentry *ret;
-#endif
 
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 	fuse_entry = get_fuse_dentry(entry);
 	if (!fuse_entry) {
-#else
-	fd = get_fuse_dentry(entry);
-	if (!fd) {
-#endif
 		ret = ERR_PTR(-EIO);
 		goto out;
 	}
 
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 	backing_entry = fuse_entry->backing_path.dentry;
 	if (!backing_entry) {
-#else
-	bd = fd->backing_path.dentry;
-	if (!bd) {
-#endif
 		ret = ERR_PTR(-ENOENT);
 		goto out;
 	}
 
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 	if (entry_inode)
 		target_nodeid = get_fuse_inode(entry_inode)->nodeid;
 
 	backing_inode = backing_entry->d_inode;
 	if (backing_inode)
-#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
-	{
-		trace_mtk_fuse_iget_backing(__func__, __LINE__, entry_inode,
-				target_nodeid, backing_inode);
-#endif
 		inode = fuse_iget_backing(dir->i_sb, target_nodeid,
 					  backing_inode);
-#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
-	}
-#endif
 
 	error = inode ?
 		fuse_handle_bpf_prog(feb, dir, &get_fuse_inode(inode)->bpf) :
 		fuse_handle_bpf_prog(feb, dir, &fuse_entry->bpf);
-#else
-	backing_inode = bd->d_inode;
-	if (!backing_inode) {
-		ret = 0;
-		goto out;
-	}
-
-	if (d_inode)
-		target_nodeid = get_fuse_inode(d_inode)->nodeid;
-
-	inode = fuse_iget_backing(dir->i_sb, target_nodeid, backing_inode);
-
-	if (IS_ERR(inode)) {
-		ret = ERR_PTR(PTR_ERR(inode));
-		goto out;
-	}
-
-	error = fuse_handle_bpf_prog(feb, dir, &get_fuse_inode(inode)->bpf);
 	if (error) {
 		ret = ERR_PTR(error);
 		goto out;
 	}
 
-	error = fuse_handle_backing(feb, &get_fuse_inode(inode)->backing_inode, &fd->backing_path);
-#endif
-	if (error) {
-		ret = ERR_PTR(error);
-		goto out;
-	}
-
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 	if (inode) {
 		error = fuse_handle_backing(feb,
 					&get_fuse_inode(inode)->backing_inode,
@@ -1392,15 +1304,8 @@ struct dentry *fuse_lookup_finalize(struct fuse_bpf_args *fa, struct inode *dir,
 		if (!IS_ERR(ret))
 			inode = NULL;
 	}
-#else
-	get_fuse_inode(inode)->nodeid = feo->nodeid;
-
-	ret = d_splice_alias(inode, entry);
-#endif
 out:
-#if IS_ENABLED(CONFIG_MTK_FUSE_UPSTREAM_BUILD)
 	iput(inode);
-#endif
 	if (feb->backing_file)
 		fput(feb->backing_file);
 	return ret;
@@ -1506,14 +1411,7 @@ int fuse_mknod_backing(
 		 */
 		goto out;
 	}
-#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
-	trace_mtk_fuse_iget_backing(__func__, __LINE__, &fuse_inode->inode,
-			fuse_inode->nodeid, backing_inode);
-	inode = fuse_iget_backing(dir->i_sb, 0, backing_path.dentry->d_inode);
-#else
 	inode = fuse_iget_backing(dir->i_sb, fuse_inode->nodeid, backing_inode);
-#endif
-
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
 		goto out;
@@ -1558,32 +1456,34 @@ int fuse_mkdir_initialize(
 
 int fuse_mkdir_backing(
 		struct fuse_bpf_args *fa,
-		struct inode *dir, struct dentry *entry, umode_t mode)
+		struct inode *dir_inode, struct dentry *entry, umode_t mode)
 {
 	int err = 0;
 	const struct fuse_mkdir_in *fmi = fa->in_args[0].value;
-	struct fuse_inode *fuse_inode = get_fuse_inode(dir);
-	struct inode *backing_inode = fuse_inode->backing_inode;
+	struct fuse_inode *dir_fuse_inode = get_fuse_inode(dir_inode);
+	struct inode *dir_backing_inode = dir_fuse_inode->backing_inode;
 	struct path backing_path = {};
 	struct inode *inode = NULL;
-	struct dentry *d;
 
 	//TODO Actually deal with changing the backing entry in mkdir
 	get_fuse_backing_path(entry, &backing_path);
 	if (!backing_path.dentry)
 		return -EBADF;
 
-	inode_lock_nested(backing_inode, I_MUTEX_PARENT);
+	inode_lock_nested(dir_backing_inode, I_MUTEX_PARENT);
 	mode = fmi->mode;
-	if (!IS_POSIXACL(backing_inode))
+	if (!IS_POSIXACL(dir_backing_inode))
 		mode &= ~fmi->umask;
-	err = vfs_mkdir(&init_user_ns, backing_inode, backing_path.dentry, mode);
+	err = vfs_mkdir(&init_user_ns, dir_backing_inode, backing_path.dentry,
+			mode);
 	if (err)
 		goto out;
 	if (d_really_is_negative(backing_path.dentry) ||
 		unlikely(d_unhashed(backing_path.dentry))) {
-		d = lookup_one_len(entry->d_name.name, backing_path.dentry->d_parent,
-				entry->d_name.len);
+		struct dentry *d = lookup_one_len(entry->d_name.name,
+					backing_path.dentry->d_parent,
+					entry->d_name.len);
+
 		if (IS_ERR(d)) {
 			err = PTR_ERR(d);
 			goto out;
@@ -1591,20 +1491,19 @@ int fuse_mkdir_backing(
 		dput(backing_path.dentry);
 		backing_path.dentry = d;
 	}
-#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
-	trace_mtk_fuse_iget_backing(__func__, __LINE__, &fuse_inode->inode,
-			fuse_inode->nodeid, backing_inode);
-	inode = fuse_iget_backing(dir->i_sb, 0, backing_path.dentry->d_inode);
-#else
-	inode = fuse_iget_backing(dir->i_sb, fuse_inode->nodeid, backing_inode);
-#endif
+	inode = fuse_iget_backing(dir_inode->i_sb, 0,
+				  backing_path.dentry->d_inode);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
 		goto out;
 	}
 	d_instantiate(entry, inode);
+	if (get_fuse_inode(inode)->bpf)
+		bpf_prog_put(get_fuse_inode(inode)->bpf);
+	get_fuse_inode(inode)->bpf = get_fuse_dentry(entry)->bpf;
+	get_fuse_dentry(entry)->bpf = NULL;
 out:
-	inode_unlock(backing_inode);
+	inode_unlock(dir_backing_inode);
 	path_put(&backing_path);
 	return err;
 }
@@ -1953,10 +1852,6 @@ int fuse_link_backing(struct fuse_bpf_args *fa, struct dentry *entry,
 		goto out;
 	}
 
-#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
-	trace_mtk_fuse_iget_backing(__func__, __LINE__, &fuse_dir_inode->inode,
-			fuse_dir_inode->nodeid, backing_dir_inode);
-#endif
 	fuse_new_inode = fuse_iget_backing(dir->i_sb, fuse_dir_inode->nodeid, backing_dir_inode);
 	if (IS_ERR(fuse_new_inode)) {
 		err = PTR_ERR(fuse_new_inode);
@@ -2347,10 +2242,6 @@ int fuse_symlink_backing(
 		 */
 		goto out;
 	}
-#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
-	trace_mtk_fuse_iget_backing(__func__, __LINE__, &fuse_inode->inode,
-			fuse_inode->nodeid, backing_inode);
-#endif
 	inode = fuse_iget_backing(dir->i_sb, fuse_inode->nodeid, backing_inode);
 	if (IS_ERR(inode)) {
 		err = PTR_ERR(inode);
@@ -2441,8 +2332,11 @@ static bool filldir(struct dir_context *ctx, const char *name, int namelen,
 	return true;
 }
 
-static int parse_dirfile(char *buf, size_t nbytes, struct dir_context *ctx)
+static int parse_dirfile(char *buf, size_t nbytes, struct dir_context *ctx,
+		loff_t next_offset)
 {
+	char *buffstart = buf;
+
 	while (nbytes >= FUSE_NAME_OFFSET) {
 		struct fuse_dirent *dirent = (struct fuse_dirent *) buf;
 		size_t reclen = FUSE_DIRENT_SIZE(dirent);
@@ -2456,12 +2350,18 @@ static int parse_dirfile(char *buf, size_t nbytes, struct dir_context *ctx)
 
 		ctx->pos = dirent->off;
 		if (!dir_emit(ctx, dirent->name, dirent->namelen, dirent->ino,
-				dirent->type))
-			break;
+				dirent->type)) {
+			// If we can't make any progress, user buffer is too small
+			if (buf == buffstart)
+				return -EINVAL;
+			else
+				return 0;
+		}
 
 		buf += reclen;
 		nbytes -= reclen;
 	}
+	ctx->pos = next_offset;
 
 	return 0;
 }
@@ -2508,13 +2408,12 @@ void *fuse_readdir_finalize(struct fuse_bpf_args *fa,
 	struct file *backing_dir = ff->backing_file;
 	int err = 0;
 
-	err = parse_dirfile(fa->out_args[1].value, fa->out_args[1].size, ctx);
+	err = parse_dirfile(fa->out_args[1].value, fa->out_args[1].size, ctx, fro->offset);
 	*force_again = !!fro->again;
 	if (*force_again && !*allow_force)
 		err = -EINVAL;
 
-	ctx->pos = fro->offset;
-	backing_dir->f_pos = fro->offset;
+	backing_dir->f_pos = ctx->pos;
 
 	free_page((unsigned long) fa->out_args[1].value);
 	return ERR_PTR(err);

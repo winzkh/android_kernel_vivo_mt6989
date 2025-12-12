@@ -18,16 +18,11 @@ static const struct mtk_gate_regs img_cg_regs = {
 	.sta_ofs = 0x0000,
 };
 
-#define GATE_IMG(_id, _name, _parent, _shift) {		\
-		.id = _id,				\
-		.name = _name,				\
-		.parent_name = _parent,			\
-		.regs = &img_cg_regs,			\
-		.shift = _shift,			\
-		.ops = &mtk_clk_gate_ops_setclr,	\
-	}
+#define GATE_IMG(_id, _name, _parent, _shift)			\
+	GATE_MTK(_id, _name, _parent, &img_cg_regs, _shift, &mtk_clk_gate_ops_setclr)
 
 static const struct mtk_gate img_clks[] = {
+	GATE_DUMMY(CLK_DUMMY, "img_dummy"),
 	GATE_IMG(CLK_IMG_SMI_COMM, "img_smi_comm", "mm_sel", 0),
 	GATE_IMG(CLK_IMG_RESZ, "img_resz", "mm_sel", 1),
 	GATE_IMG(CLK_IMG_JPGDEC_SMI, "img_jpgdec_smi", "mm_sel", 5),
@@ -58,5 +53,5 @@ static struct platform_driver clk_mt2701_img_drv = {
 		.of_match_table = of_match_clk_mt2701_img,
 	},
 };
-
-builtin_platform_driver(clk_mt2701_img_drv);
+module_platform_driver(clk_mt2701_img_drv);
+MODULE_LICENSE("GPL");
