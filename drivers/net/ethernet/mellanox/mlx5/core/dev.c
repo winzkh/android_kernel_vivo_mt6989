@@ -396,7 +396,7 @@ int mlx5_attach_device(struct mlx5_core_dev *dev)
 	return ret;
 }
 
-void mlx5_detach_device(struct mlx5_core_dev *dev, bool suspend)
+void mlx5_detach_device(struct mlx5_core_dev *dev)
 {
 	struct mlx5_priv *priv = &dev->priv;
 	struct auxiliary_device *adev;
@@ -426,7 +426,7 @@ void mlx5_detach_device(struct mlx5_core_dev *dev, bool suspend)
 
 		adrv = to_auxiliary_drv(adev->dev.driver);
 
-		if (adrv->suspend && suspend) {
+		if (adrv->suspend) {
 			adrv->suspend(adev, pm);
 			continue;
 		}

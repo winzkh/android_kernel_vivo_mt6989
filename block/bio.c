@@ -930,7 +930,7 @@ static bool bio_try_merge_hw_seg(struct request_queue *q, struct bio *bio,
 
 	if ((addr1 | mask) != (addr2 | mask))
 		return false;
-	if (len > queue_max_segment_size(q) - bv->bv_len)
+	if (bv->bv_len + len > queue_max_segment_size(q))
 		return false;
 	return __bio_try_merge_page(bio, page, len, offset, same_page);
 }
@@ -979,7 +979,10 @@ int bio_add_hw_page(struct request_queue *q, struct bio *bio,
 	if (bio->bi_vcnt >= queue_max_segments(q))
 		return 0;
 
-	bvec_set_page(&bio->bi_io_vec[bio->bi_vcnt], page, len, offset);
+	bvec = &bio->bi_io_vec[bio->bi_vcnt];
+	bvec->bv_page = page;
+	bvec->bv_len = len;
+	bvec->bv_offset = offset;
 	bio->bi_vcnt++;
 	bio->bi_iter.bi_size += len;
 	return len;
@@ -1055,10 +1058,15 @@ EXPORT_SYMBOL_GPL(bio_add_zone_append_page);
 void __bio_add_page(struct bio *bio, struct page *page,
 		unsigned int len, unsigned int off)
 {
+	struct bio_vec *bv = &bio->bi_io_vec[bio->bi_vcnt];
+
 	WARN_ON_ONCE(bio_flagged(bio, BIO_CLONED));
 	WARN_ON_ONCE(bio_full(bio, len));
 
-	bvec_set_page(&bio->bi_io_vec[bio->bi_vcnt], page, len, off);
+	bv->bv_page = page;
+	bv->bv_offset = off;
+	bv->bv_len = len;
+
 	bio->bi_iter.bi_size += len;
 	bio->bi_vcnt++;
 }
@@ -1112,19 +1120,13 @@ bool bio_add_folio(struct bio *bio, struct folio *folio, size_t len,
 
 void __bio_release_pages(struct bio *bio, bool mark_dirty)
 {
-	struct folio_iter fi;
+	struct bvec_iter_all iter_all;
+	struct bio_vec *bvec;
 
-	bio_for_each_folio_all(fi, bio) {
-		size_t nr_pages;
-
-		if (mark_dirty) {
-			folio_lock(fi.folio);
-			folio_mark_dirty(fi.folio);
-			folio_unlock(fi.folio);
-		}
-		nr_pages = (fi.offset + fi.length - 1) / PAGE_SIZE -
-			   fi.offset / PAGE_SIZE + 1;
-		folio_put_refs(fi.folio, nr_pages);
+	bio_for_each_segment_all(bvec, bio, iter_all) {
+		if (mark_dirty && !PageCompound(bvec->bv_page))
+			set_page_dirty_lock(bvec->bv_page);
+		put_page(bvec->bv_page);
 	}
 }
 EXPORT_SYMBOL_GPL(__bio_release_pages);
@@ -1423,12 +1425,12 @@ EXPORT_SYMBOL(bio_free_pages);
  */
 void bio_set_pages_dirty(struct bio *bio)
 {
-	struct folio_iter fi;
+	struct bio_vec *bvec;
+	struct bvec_iter_all iter_all;
 
-	bio_for_each_folio_all(fi, bio) {
-		folio_lock(fi.folio);
-		folio_mark_dirty(fi.folio);
-		folio_unlock(fi.folio);
+	bio_for_each_segment_all(bvec, bio, iter_all) {
+		if (!PageCompound(bvec->bv_page))
+			set_page_dirty_lock(bvec->bv_page);
 	}
 }
 
@@ -1471,11 +1473,12 @@ static void bio_dirty_fn(struct work_struct *work)
 
 void bio_check_pages_dirty(struct bio *bio)
 {
-	struct folio_iter fi;
+	struct bio_vec *bvec;
 	unsigned long flags;
+	struct bvec_iter_all iter_all;
 
-	bio_for_each_folio_all(fi, bio) {
-		if (!folio_test_dirty(fi.folio))
+	bio_for_each_segment_all(bvec, bio, iter_all) {
+		if (!PageDirty(bvec->bv_page) && !PageCompound(bvec->bv_page))
 			goto defer;
 	}
 

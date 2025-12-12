@@ -23,7 +23,6 @@
 /**
  * struct scmi_smc - Structure representing a SCMI smc transport
  *
- * @irq: An optional IRQ for completion
  * @cinfo: SCMI channel info
  * @shmem: Transmit/Receive shared memory area
  * @shmem_lock: Lock to protect access to Tx/Rx shared memory area.
@@ -34,7 +33,6 @@
  */
 
 struct scmi_smc {
-	int irq;
 	struct scmi_chan_info *cinfo;
 	struct scmi_shared_mem __iomem *shmem;
 	/* Protect access to shmem area */
@@ -108,7 +106,7 @@ static int smc_chan_setup(struct scmi_chan_info *cinfo, struct device *dev,
 	struct resource res;
 	struct device_node *np;
 	u32 func_id;
-	int ret;
+	int ret, irq;
 
 	if (!tx)
 		return -ENODEV;
@@ -118,10 +116,8 @@ static int smc_chan_setup(struct scmi_chan_info *cinfo, struct device *dev,
 		return -ENOMEM;
 
 	np = of_parse_phandle(cdev->of_node, "shmem", 0);
-	if (!of_device_is_compatible(np, "arm,scmi-shmem")) {
-		of_node_put(np);
+	if (!of_device_is_compatible(np, "arm,scmi-shmem"))
 		return -ENXIO;
-	}
 
 	ret = of_address_to_resource(np, 0, &res);
 	of_node_put(np);
@@ -146,10 +142,11 @@ static int smc_chan_setup(struct scmi_chan_info *cinfo, struct device *dev,
 	 * completion of a message is signaled by an interrupt rather than by
 	 * the return of the SMC call.
 	 */
-	scmi_info->irq = of_irq_get_byname(cdev->of_node, "a2p");
-	if (scmi_info->irq > 0) {
-		ret = request_irq(scmi_info->irq, smc_msg_done_isr,
-				  IRQF_NO_SUSPEND, dev_name(dev), scmi_info);
+	irq = of_irq_get_byname(cdev->of_node, "a2p");
+	if (irq > 0) {
+		ret = devm_request_irq(dev, irq, smc_msg_done_isr,
+				       IRQF_NO_SUSPEND,
+				       dev_name(dev), scmi_info);
 		if (ret) {
 			dev_err(dev, "failed to setup SCMI smc irq\n");
 			return ret;
@@ -170,17 +167,6 @@ static int smc_chan_free(int id, void *p, void *data)
 {
 	struct scmi_chan_info *cinfo = p;
 	struct scmi_smc *scmi_info = cinfo->transport_info;
-
-	/*
-	 * Different protocols might share the same chan info, so a previous
-	 * smc_chan_free call might have already freed the structure.
-	 */
-	if (!scmi_info)
-		return 0;
-
-	/* Ignore any possible further reception on the IRQ path */
-	if (scmi_info->irq > 0)
-		free_irq(scmi_info->irq, scmi_info);
 
 	cinfo->transport_info = NULL;
 	scmi_info->cinfo = NULL;

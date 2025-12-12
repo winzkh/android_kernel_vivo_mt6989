@@ -115,13 +115,6 @@ struct resource_funcs {
 				int vlevel);
 	void (*update_soc_for_wm_a)(
 				struct dc *dc, struct dc_state *context);
-
-	/**
-	 * @populate_dml_pipes - Populate pipe data struct
-	 *
-	 * Returns:
-	 * Total of pipes available in the specific ASIC.
-	 */
 	int (*populate_dml_pipes)(
 		struct dc *dc,
 		struct dc_state *context,
@@ -241,7 +234,6 @@ struct resource_funcs {
             unsigned int index);
 
 	bool (*remove_phantom_pipes)(struct dc *dc, struct dc_state *context);
-	void (*retain_phantom_pipes)(struct dc *dc, struct dc_state *context);
 	void (*get_panel_config_defaults)(struct dc_panel_config *panel_config);
 };
 

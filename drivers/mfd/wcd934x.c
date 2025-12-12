@@ -253,9 +253,8 @@ static int wcd934x_slim_probe(struct slim_device *sdev)
 	usleep_range(600, 650);
 	reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
 	if (IS_ERR(reset_gpio)) {
-		ret = dev_err_probe(dev, PTR_ERR(reset_gpio),
-				    "Failed to get reset gpio\n");
-		goto err_disable_regulators;
+		return dev_err_probe(dev, PTR_ERR(reset_gpio),
+				"Failed to get reset gpio: err = %ld\n", PTR_ERR(reset_gpio));
 	}
 	msleep(20);
 	gpiod_set_value(reset_gpio, 1);
@@ -265,10 +264,6 @@ static int wcd934x_slim_probe(struct slim_device *sdev)
 	dev_set_drvdata(dev, ddata);
 
 	return 0;
-
-err_disable_regulators:
-	regulator_bulk_disable(WCD934X_MAX_SUPPLY, ddata->supplies);
-	return ret;
 }
 
 static void wcd934x_slim_remove(struct slim_device *sdev)

@@ -1784,7 +1784,8 @@ int jbd2_journal_forget(handle_t *handle, struct buffer_head *bh)
 		 * Otherwise, if the buffer has been written to disk,
 		 * it is safe to remove the checkpoint and drop it.
 		 */
-		if (jbd2_journal_try_remove_checkpoint(jh) >= 0) {
+		if (!buffer_dirty(bh)) {
+			__jbd2_journal_remove_checkpoint(jh);
 			spin_unlock(&journal->j_list_lock);
 			goto drop;
 		}
@@ -2111,14 +2112,20 @@ __journal_try_to_free_buffer(journal_t *journal, struct buffer_head *bh)
 
 	jh = bh2jh(bh);
 
+	if (buffer_locked(bh) || buffer_dirty(bh))
+		goto out;
+
 	if (jh->b_next_transaction != NULL || jh->b_transaction != NULL)
-		return;
+		goto out;
 
 	spin_lock(&journal->j_list_lock);
-	/* Remove written-back checkpointed metadata buffer */
-	if (jh->b_cp_transaction != NULL)
-		jbd2_journal_try_remove_checkpoint(jh);
+	if (jh->b_cp_transaction != NULL) {
+		/* written-back checkpointed metadata buffer */
+		JBUFFER_TRACE(jh, "remove from checkpoint list");
+		__jbd2_journal_remove_checkpoint(jh);
+	}
 	spin_unlock(&journal->j_list_lock);
+out:
 	return;
 }
 
@@ -2380,9 +2387,6 @@ static int journal_unmap_buffer(journal_t *journal, struct buffer_head *bh,
 			spin_unlock(&jh->b_state_lock);
 			write_unlock(&journal->j_state_lock);
 			jbd2_journal_put_journal_head(jh);
-			/* Already zapped buffer? Nothing to do... */
-			if (!bh->b_bdev)
-				return 0;
 			return -EBUSY;
 		}
 		/*

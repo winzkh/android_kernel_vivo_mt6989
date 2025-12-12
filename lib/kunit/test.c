@@ -149,18 +149,9 @@ EXPORT_SYMBOL_GPL(kunit_suite_num_test_cases);
 
 static void kunit_print_suite_start(struct kunit_suite *suite)
 {
-	/*
-	 * We do not log the test suite header as doing so would
-	 * mean debugfs display would consist of the test suite
-	 * header prior to individual test results.
-	 * Hence directly printk the suite status, and we will
-	 * separately seq_printf() the suite header for the debugfs
-	 * representation.
-	 */
-	pr_info(KUNIT_SUBTEST_INDENT "KTAP version 1\n");
-	pr_info(KUNIT_SUBTEST_INDENT "# Subtest: %s\n",
+	kunit_log(KERN_INFO, suite, KUNIT_SUBTEST_INDENT "# Subtest: %s",
 		  suite->name);
-	pr_info(KUNIT_SUBTEST_INDENT "1..%zd\n",
+	kunit_log(KERN_INFO, suite, KUNIT_SUBTEST_INDENT "1..%zd",
 		  kunit_suite_num_test_cases(suite));
 }
 
@@ -177,19 +168,20 @@ static void kunit_print_ok_not_ok(void *test_or_suite,
 
 	/*
 	 * We do not log the test suite results as doing so would
-	 * mean debugfs display would consist of an incorrect test
-	 * number. Hence directly printk the suite result, and we will
-	 * separately seq_printf() the suite results for the debugfs
+	 * mean debugfs display would consist of the test suite
+	 * description and status prior to individual test results.
+	 * Hence directly printk the suite status, and we will
+	 * separately seq_printf() the suite status for the debugfs
 	 * representation.
 	 */
 	if (suite)
-		pr_info("%s %zd %s%s%s\n",
+		pr_info("%s %zd - %s%s%s\n",
 			kunit_status_to_ok_not_ok(status),
 			test_number, description, directive_header,
 			(status == KUNIT_SKIPPED) ? directive : "");
 	else
 		kunit_log(KERN_INFO, test,
-			  KUNIT_SUBTEST_INDENT "%s %zd %s%s%s",
+			  KUNIT_SUBTEST_INDENT "%s %zd - %s%s%s",
 			  kunit_status_to_ok_not_ok(status),
 			  test_number, description, directive_header,
 			  (status == KUNIT_SKIPPED) ? directive : "");
@@ -551,8 +543,6 @@ int kunit_run_tests(struct kunit_suite *suite)
 			param_desc[0] = '\0';
 			test.param_value = test_case->generate_params(NULL, param_desc);
 			kunit_log(KERN_INFO, &test, KUNIT_SUBTEST_INDENT KUNIT_SUBTEST_INDENT
-				  "KTAP version 1\n");
-			kunit_log(KERN_INFO, &test, KUNIT_SUBTEST_INDENT KUNIT_SUBTEST_INDENT
 				  "# Subtest: %s", test_case->name);
 
 			while (test.param_value) {
@@ -565,7 +555,7 @@ int kunit_run_tests(struct kunit_suite *suite)
 
 				kunit_log(KERN_INFO, &test,
 					  KUNIT_SUBTEST_INDENT KUNIT_SUBTEST_INDENT
-					  "%s %d %s",
+					  "%s %d - %s",
 					  kunit_status_to_ok_not_ok(test.status),
 					  test.param_index + 1, param_desc);
 
@@ -667,13 +657,12 @@ static int kunit_module_notify(struct notifier_block *nb, unsigned long val,
 
 	switch (val) {
 	case MODULE_STATE_LIVE:
+		kunit_module_init(mod);
 		break;
 	case MODULE_STATE_GOING:
 		kunit_module_exit(mod);
 		break;
 	case MODULE_STATE_COMING:
-		kunit_module_init(mod);
-		break;
 	case MODULE_STATE_UNFORMED:
 		break;
 	}

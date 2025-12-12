@@ -7,7 +7,6 @@
 
 #include <drm/drm_print.h>
 
-#include "dp_reg.h"
 #include "dp_link.h"
 #include "dp_panel.h"
 
@@ -1069,14 +1068,14 @@ int dp_link_process_request(struct dp_link *dp_link)
 		}
 	}
 
-	drm_dbg_dp(link->drm_dev, "sink request=%#x\n",
+	drm_dbg_dp(link->drm_dev, "sink request=%#x",
 				dp_link->sink_request);
 	return ret;
 }
 
 int dp_link_get_colorimetry_config(struct dp_link *dp_link)
 {
-	u32 cc = DP_MISC0_COLORIMERY_CFG_LEGACY_RGB;
+	u32 cc;
 	struct dp_link_private *link;
 
 	if (!dp_link) {
@@ -1090,11 +1089,10 @@ int dp_link_get_colorimetry_config(struct dp_link *dp_link)
 	 * Unless a video pattern CTS test is ongoing, use RGB_VESA
 	 * Only RGB_VESA and RGB_CEA supported for now
 	 */
-	if (dp_link_is_video_pattern_requested(link)) {
-		if (link->dp_link.test_video.test_dyn_range &
-					DP_TEST_DYNAMIC_RANGE_CEA)
-			cc = DP_MISC0_COLORIMERY_CFG_CEA_RGB;
-	}
+	if (dp_link_is_video_pattern_requested(link))
+		cc = link->dp_link.test_video.test_dyn_range;
+	else
+		cc = DP_TEST_DYNAMIC_RANGE_VESA;
 
 	return cc;
 }
@@ -1174,9 +1172,6 @@ void dp_link_reset_phy_params_vx_px(struct dp_link *dp_link)
 u32 dp_link_get_test_bits_depth(struct dp_link *dp_link, u32 bpp)
 {
 	u32 tbd;
-	struct dp_link_private *link;
-
-	link = container_of(dp_link, struct dp_link_private, dp_link);
 
 	/*
 	 * Few simplistic rules and assumptions made here:
@@ -1194,13 +1189,12 @@ u32 dp_link_get_test_bits_depth(struct dp_link *dp_link, u32 bpp)
 		tbd = DP_TEST_BIT_DEPTH_10;
 		break;
 	default:
-		drm_dbg_dp(link->drm_dev, "bpp=%d not supported, use bpc=8\n",
-			   bpp);
-		tbd = DP_TEST_BIT_DEPTH_8;
+		tbd = DP_TEST_BIT_DEPTH_UNKNOWN;
 		break;
 	}
 
-	tbd = (tbd >> DP_TEST_BIT_DEPTH_SHIFT);
+	if (tbd != DP_TEST_BIT_DEPTH_UNKNOWN)
+		tbd = (tbd >> DP_TEST_BIT_DEPTH_SHIFT);
 
 	return tbd;
 }

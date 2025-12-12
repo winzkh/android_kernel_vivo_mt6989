@@ -58,7 +58,6 @@
 
 static int num_standard_resources;
 static struct resource *standard_resources;
-struct hypervisor_ops hyp_ops;
 
 phys_addr_t __fdt_pointer __initdata;
 

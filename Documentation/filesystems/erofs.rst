@@ -34,14 +34,8 @@ Here is the main features of EROFS:
 
  - Little endian on-disk design;
 
- - Block-based distribution and file-based distribution over fscache are
-   supported;
-
- - Support multiple devices to refer to external blobs, which can be used
-   for container images;
-
- - 32-bit block addresses for each device, therefore 16TiB address space at
-   most with 4KiB block size for now;
+ - 4KiB block size and 32-bit block addresses, therefore 16TiB address space
+   at most for now;
 
  - Two inode layouts for different requirements:
 

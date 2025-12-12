@@ -573,8 +573,8 @@ static s32 bpf_find_btf_id(const char *name, u32 kind, struct btf **btf_p)
 			*btf_p = btf;
 			return ret;
 		}
-		btf_put(btf);
 		spin_lock_bh(&btf_idr_lock);
+		btf_put(btf);
 	}
 	spin_unlock_bh(&btf_idr_lock);
 	return ret;
@@ -736,12 +736,13 @@ static bool btf_name_offset_valid(const struct btf *btf, u32 offset)
 	return offset < btf->hdr.str_len;
 }
 
-static bool __btf_name_char_ok(char c, bool first)
+static bool __btf_name_char_ok(char c, bool first, bool dot_ok)
 {
 	if ((first ? !isalpha(c) :
 		     !isalnum(c)) &&
 	    c != '_' &&
-	    c != '.')
+	    ((c == '.' && !dot_ok) ||
+	      c != '.'))
 		return false;
 	return true;
 }
@@ -758,20 +759,20 @@ static const char *btf_str_by_offset(const struct btf *btf, u32 offset)
 	return NULL;
 }
 
-static bool __btf_name_valid(const struct btf *btf, u32 offset)
+static bool __btf_name_valid(const struct btf *btf, u32 offset, bool dot_ok)
 {
 	/* offset must be valid */
 	const char *src = btf_str_by_offset(btf, offset);
 	const char *src_limit;
 
-	if (!__btf_name_char_ok(*src, true))
+	if (!__btf_name_char_ok(*src, true, dot_ok))
 		return false;
 
 	/* set a limit on identifier length */
 	src_limit = src + KSYM_NAME_LEN;
 	src++;
 	while (*src && src < src_limit) {
-		if (!__btf_name_char_ok(*src, false))
+		if (!__btf_name_char_ok(*src, false, dot_ok))
 			return false;
 		src++;
 	}
@@ -779,14 +780,17 @@ static bool __btf_name_valid(const struct btf *btf, u32 offset)
 	return !*src;
 }
 
+/* Only C-style identifier is permitted. This can be relaxed if
+ * necessary.
+ */
 static bool btf_name_valid_identifier(const struct btf *btf, u32 offset)
 {
-	return __btf_name_valid(btf, offset);
+	return __btf_name_valid(btf, offset, false);
 }
 
 static bool btf_name_valid_section(const struct btf *btf, u32 offset)
 {
-	return __btf_name_valid(btf, offset);
+	return __btf_name_valid(btf, offset, true);
 }
 
 static const char *__btf_name_by_offset(const struct btf *btf, u32 offset)
@@ -4054,7 +4058,7 @@ static s32 btf_var_check_meta(struct btf_verifier_env *env,
 	}
 
 	if (!t->name_off ||
-	    !__btf_name_valid(env->btf, t->name_off)) {
+	    !__btf_name_valid(env->btf, t->name_off, true)) {
 		btf_verifier_log_type(env, t, "Invalid name");
 		return -EINVAL;
 	}
@@ -5343,8 +5347,12 @@ struct btf *bpf_prog_get_target_btf(const struct bpf_prog *prog)
 
 static bool is_int_ptr(struct btf *btf, const struct btf_type *t)
 {
-	/* skip modifiers */
-	t = btf_type_skip_modifiers(btf, t->type, NULL);
+	/* t comes in already as a pointer */
+	t = btf_type_by_id(btf, t->type);
+
+	/* allow const */
+	if (BTF_INFO_KIND(t->info) == BTF_KIND_CONST)
+		t = btf_type_by_id(btf, t->type);
 
 	return btf_type_is_int(t);
 }
@@ -5802,7 +5810,7 @@ error:
 		 * that also allows using an array of int as a scratch
 		 * space. e.g. skb->cb[].
 		 */
-		if (off + size > mtrue_end && !(*flag & PTR_UNTRUSTED)) {
+		if (off + size > mtrue_end) {
 			bpf_log(log,
 				"access beyond the end of member %s (mend:%u) in struct %s with off %u size %u\n",
 				mname, mtrue_end, tname, off, size);
@@ -7486,8 +7494,10 @@ int register_btf_kfunc_id_set(enum bpf_prog_type prog_type,
 			pr_err("missing vmlinux BTF, cannot register kfuncs\n");
 			return -ENOENT;
 		}
-		if (kset->owner && IS_ENABLED(CONFIG_DEBUG_INFO_BTF_MODULES))
-			pr_warn("missing module BTF, cannot register kfuncs\n");
+		if (kset->owner && IS_ENABLED(CONFIG_DEBUG_INFO_BTF_MODULES)) {
+			pr_err("missing module BTF, cannot register kfuncs\n");
+			return -ENOENT;
+		}
 		return 0;
 	}
 	if (IS_ERR(btf))
@@ -7968,10 +7978,12 @@ check_modules:
 		btf_get(mod_btf);
 		spin_unlock_bh(&btf_idr_lock);
 		cands = bpf_core_add_cands(cands, mod_btf, btf_nr_types(main_btf));
-		btf_put(mod_btf);
-		if (IS_ERR(cands))
+		if (IS_ERR(cands)) {
+			btf_put(mod_btf);
 			return ERR_CAST(cands);
+		}
 		spin_lock_bh(&btf_idr_lock);
+		btf_put(mod_btf);
 	}
 	spin_unlock_bh(&btf_idr_lock);
 	/* cands is a pointer to kmalloced memory here if cands->cnt > 0

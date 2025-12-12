@@ -4307,10 +4307,6 @@ static int l2cap_connect_create_rsp(struct l2cap_conn *conn,
 	result = __le16_to_cpu(rsp->result);
 	status = __le16_to_cpu(rsp->status);
 
-	if (result == L2CAP_CR_SUCCESS && (dcid < L2CAP_CID_DYN_START ||
-					   dcid > L2CAP_CID_DYN_END))
-		return -EPROTO;
-
 	BT_DBG("dcid 0x%4.4x scid 0x%4.4x result 0x%2.2x status 0x%2.2x",
 	       dcid, scid, result, status);
 
@@ -4342,11 +4338,6 @@ static int l2cap_connect_create_rsp(struct l2cap_conn *conn,
 
 	switch (result) {
 	case L2CAP_CR_SUCCESS:
-		if (__l2cap_get_chan_by_dcid(conn, dcid)) {
-			err = -EBADSLT;
-			break;
-		}
-
 		l2cap_state_change(chan, BT_CONFIG);
 		chan->ident = 0;
 		chan->dcid = dcid;
@@ -4673,9 +4664,7 @@ static inline int l2cap_disconnect_req(struct l2cap_conn *conn,
 
 	chan->ops->set_shutdown(chan);
 
-	l2cap_chan_unlock(chan);
 	mutex_lock(&conn->chan_lock);
-	l2cap_chan_lock(chan);
 	l2cap_chan_del(chan, ECONNRESET);
 	mutex_unlock(&conn->chan_lock);
 
@@ -4705,6 +4694,7 @@ static inline int l2cap_disconnect_rsp(struct l2cap_conn *conn,
 
 	chan = l2cap_get_chan_by_scid(conn, scid);
 	if (!chan) {
+		mutex_unlock(&conn->chan_lock);
 		return 0;
 	}
 
@@ -4714,9 +4704,7 @@ static inline int l2cap_disconnect_rsp(struct l2cap_conn *conn,
 		return 0;
 	}
 
-	l2cap_chan_unlock(chan);
 	mutex_lock(&conn->chan_lock);
-	l2cap_chan_lock(chan);
 	l2cap_chan_del(chan, 0);
 	mutex_unlock(&conn->chan_lock);
 
@@ -5614,13 +5602,7 @@ static inline int l2cap_conn_param_update_req(struct l2cap_conn *conn,
 
 	memset(&rsp, 0, sizeof(rsp));
 
-	if (max > hcon->le_conn_max_interval) {
-		BT_DBG("requested connection interval exceeds current bounds.");
-		err = -EINVAL;
-	} else {
-		err = hci_check_conn_params(min, max, latency, to_multiplier);
-	}
-
+	err = hci_check_conn_params(min, max, latency, to_multiplier);
 	if (err)
 		rsp.result = cpu_to_le16(L2CAP_CONN_PARAM_REJECTED);
 	else
@@ -6381,14 +6363,9 @@ static inline int l2cap_le_command_rej(struct l2cap_conn *conn,
 	if (!chan)
 		goto done;
 
-	chan = l2cap_chan_hold_unless_zero(chan);
-	if (!chan)
-		goto done;
-
 	l2cap_chan_lock(chan);
 	l2cap_chan_del(chan, ECONNREFUSED);
 	l2cap_chan_unlock(chan);
-	l2cap_chan_put(chan);
 
 done:
 	mutex_unlock(&conn->chan_lock);
@@ -6499,14 +6476,6 @@ drop:
 	kfree_skb(skb);
 }
 
-static inline void l2cap_sig_send_rej(struct l2cap_conn *conn, u16 ident)
-{
-	struct l2cap_cmd_rej_unk rej;
-
-	rej.reason = cpu_to_le16(L2CAP_REJ_NOT_UNDERSTOOD);
-	l2cap_send_cmd(conn, ident, L2CAP_COMMAND_REJ, sizeof(rej), &rej);
-}
-
 static inline void l2cap_sig_channel(struct l2cap_conn *conn,
 				     struct sk_buff *skb)
 {
@@ -6532,23 +6501,21 @@ static inline void l2cap_sig_channel(struct l2cap_conn *conn,
 
 		if (len > skb->len || !cmd->ident) {
 			BT_DBG("corrupted command");
-			l2cap_sig_send_rej(conn, cmd->ident);
-			skb_pull(skb, len > skb->len ? skb->len : len);
-			continue;
+			break;
 		}
 
 		err = l2cap_bredr_sig_cmd(conn, cmd, len, skb->data);
 		if (err) {
+			struct l2cap_cmd_rej_unk rej;
+
 			BT_ERR("Wrong link type (%d)", err);
-			l2cap_sig_send_rej(conn, cmd->ident);
+
+			rej.reason = cpu_to_le16(L2CAP_REJ_NOT_UNDERSTOOD);
+			l2cap_send_cmd(conn, cmd->ident, L2CAP_COMMAND_REJ,
+				       sizeof(rej), &rej);
 		}
 
 		skb_pull(skb, len);
-	}
-
-	if (skb->len > 0) {
-		BT_DBG("corrupted command");
-		l2cap_sig_send_rej(conn, 0);
 	}
 
 drop:

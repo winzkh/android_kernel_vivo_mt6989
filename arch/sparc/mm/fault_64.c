@@ -383,9 +383,8 @@ continue_fault:
 				goto bad_area;
 		}
 	}
-	vma = expand_stack(mm, address);
-	if (!vma)
-		goto bad_area_nosemaphore;
+	if (expand_stack(vma, address))
+		goto bad_area;
 	/*
 	 * Ok, we have a good vm_area for this memory access, so
 	 * we can handle it..
@@ -483,9 +482,8 @@ exit_exception:
 	 * Fix it, but check if it's kernel or user first..
 	 */
 bad_area:
-	mmap_read_unlock(mm);
-bad_area_nosemaphore:
 	insn = get_fault_insn(regs, insn);
+	mmap_read_unlock(mm);
 
 handle_kernel_fault:
 	do_kernel_fault(regs, si_code, fault_code, insn, address);

@@ -292,6 +292,20 @@ static inline int ufshcd_mcq_vops_config_esi(struct ufs_hba *hba)
 	return -EOPNOTSUPP;
 }
 
+#if IS_ENABLED(CONFIG_MTK_UFS_DEBUG_BUILD)
+static inline void ufshcd_vops_check_bus_status(struct ufs_hba *hba)
+{
+	if (hba->vops && hba->vops->check_bus_status)
+		hba->vops->check_bus_status(hba);
+}
+
+static inline void ufshcd_vops_dbg_dump(struct ufs_hba *hba, u32 latest_cnt)
+{
+	if (hba->vops && hba->vops->dbg_dump)
+		hba->vops->dbg_dump(hba, latest_cnt);
+}
+#endif
+
 extern const struct ufs_pm_lvl_states ufs_pm_lvl_states[];
 
 /**
@@ -370,11 +384,10 @@ static inline bool ufs_is_valid_unit_desc_lun(struct ufs_dev_info *dev_info, u8 
 
 static inline void ufshcd_inc_sq_tail(struct ufs_hw_queue *q)
 {
+	u32 mask = q->max_entries - 1;
 	u32 val;
 
-	q->sq_tail_slot++;
-	if (q->sq_tail_slot == q->max_entries)
-		q->sq_tail_slot = 0;
+	q->sq_tail_slot = (q->sq_tail_slot + 1) & mask;
 	val = q->sq_tail_slot * sizeof(struct utp_transfer_req_desc);
 	writel(val, q->mcq_sq_tail);
 }

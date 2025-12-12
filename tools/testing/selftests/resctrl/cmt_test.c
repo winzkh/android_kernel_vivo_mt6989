@@ -32,7 +32,7 @@ static int cmt_setup(int num, ...)
 
 	/* Run NUM_OF_RUNS times */
 	if (p->num_of_runs >= NUM_OF_RUNS)
-		return END_OF_TESTS;
+		return -1;
 
 	p->num_of_runs++;
 
@@ -90,6 +90,9 @@ int cmt_resctrl_val(int cpu_no, int n, char **benchmark_cmd)
 	ret = remount_resctrlfs(mum_resctrlfs);
 	if (ret)
 		return ret;
+
+	if (!validate_resctrl_feature_request(CMT_STR))
+		return -1;
 
 	ret = get_cbm_mask("L3", cbm_mask);
 	if (ret)

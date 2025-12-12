@@ -139,7 +139,6 @@ struct gh_rm_hyp_resource {
 	__le32 resource_label;
 	__le64 cap_id;
 	__le32 virq_handle;
-#define GH_RM_RESOURCE_NO_VIRQ		0xFFFFFFFF
 	__le32 virq;
 	__le64 base;
 	__le64 size;

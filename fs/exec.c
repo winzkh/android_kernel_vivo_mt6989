@@ -198,39 +198,33 @@ static struct page *get_arg_page(struct linux_binprm *bprm, unsigned long pos,
 		int write)
 {
 	struct page *page;
-	struct vm_area_struct *vma = bprm->vma;
-	struct mm_struct *mm = bprm->mm;
 	int ret;
+	unsigned int gup_flags = FOLL_FORCE;
 
-	/*
-	 * Avoid relying on expanding the stack down in GUP (which
-	 * does not work for STACK_GROWSUP anyway), and just do it
-	 * by hand ahead of time.
-	 */
-	if (write && pos < vma->vm_start) {
-		mmap_write_lock(mm);
-		ret = expand_downwards(vma, pos);
-		if (unlikely(ret < 0)) {
-			mmap_write_unlock(mm);
+#ifdef CONFIG_STACK_GROWSUP
+	if (write) {
+		ret = expand_downwards(bprm->vma, pos);
+		if (ret < 0)
 			return NULL;
-		}
-		mmap_write_downgrade(mm);
-	} else
-		mmap_read_lock(mm);
+	}
+#endif
+
+	if (write)
+		gup_flags |= FOLL_WRITE;
 
 	/*
 	 * We are doing an exec().  'current' is the process
-	 * doing the exec and 'mm' is the new process's mm.
+	 * doing the exec and bprm->mm is the new process's mm.
 	 */
-	ret = get_user_pages_remote(mm, pos, 1,
-			write ? FOLL_WRITE : 0,
+	mmap_read_lock(bprm->mm);
+	ret = get_user_pages_remote(bprm->mm, pos, 1, gup_flags,
 			&page, NULL, NULL);
-	mmap_read_unlock(mm);
+	mmap_read_unlock(bprm->mm);
 	if (ret <= 0)
 		return NULL;
 
 	if (write)
-		acct_arg_size(bprm, vma_pages(vma));
+		acct_arg_size(bprm, vma_pages(bprm->vma));
 
 	return page;
 }
@@ -860,7 +854,7 @@ int setup_arg_pages(struct linux_binprm *bprm,
 		stack_base = vma->vm_start - stack_expand;
 #endif
 	current->mm->start_stack = bprm->p;
-	ret = expand_stack_locked(vma, stack_base);
+	ret = expand_stack(vma, stack_base);
 	if (ret)
 		ret = -EFAULT;
 
@@ -896,7 +890,6 @@ int transfer_args_to_stack(struct linux_binprm *bprm,
 			goto out;
 	}
 
-	bprm->exec += *sp_location - MAX_ARG_PAGES * PAGE_SIZE;
 	*sp_location = sp;
 
 out:
@@ -1411,9 +1404,6 @@ int begin_new_exec(struct linux_binprm * bprm)
 
 out_unlock:
 	up_write(&me->signal->exec_update_lock);
-	if (!bprm->cred)
-		mutex_unlock(&me->signal->cred_guard_mutex);
-
 out:
 	return retval;
 }

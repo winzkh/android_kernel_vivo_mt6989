@@ -866,13 +866,10 @@ static int igt_reset_active_engine(void *arg)
 }
 
 struct active_engine {
-	struct kthread_worker *worker;
-	struct kthread_work work;
+	struct task_struct *task;
 	struct intel_engine_cs *engine;
 	unsigned long resets;
 	unsigned int flags;
-	bool stop;
-	int result;
 };
 
 #define TEST_ACTIVE	BIT(0)
@@ -903,10 +900,10 @@ static int active_request_put(struct i915_request *rq)
 	return err;
 }
 
-static void active_engine(struct kthread_work *work)
+static int active_engine(void *data)
 {
 	I915_RND_STATE(prng);
-	struct active_engine *arg = container_of(work, typeof(*arg), work);
+	struct active_engine *arg = data;
 	struct intel_engine_cs *engine = arg->engine;
 	struct i915_request *rq[8] = {};
 	struct intel_context *ce[ARRAY_SIZE(rq)];
@@ -916,17 +913,16 @@ static void active_engine(struct kthread_work *work)
 	for (count = 0; count < ARRAY_SIZE(ce); count++) {
 		ce[count] = intel_context_create(engine);
 		if (IS_ERR(ce[count])) {
-			arg->result = PTR_ERR(ce[count]);
-			pr_err("[%s] Create context #%ld failed: %d!\n",
-			       engine->name, count, arg->result);
+			err = PTR_ERR(ce[count]);
+			pr_err("[%s] Create context #%ld failed: %d!\n", engine->name, count, err);
 			while (--count)
 				intel_context_put(ce[count]);
-			return;
+			return err;
 		}
 	}
 
 	count = 0;
-	while (!READ_ONCE(arg->stop)) {
+	while (!kthread_should_stop()) {
 		unsigned int idx = count++ & (ARRAY_SIZE(rq) - 1);
 		struct i915_request *old = rq[idx];
 		struct i915_request *new;
@@ -971,7 +967,7 @@ static void active_engine(struct kthread_work *work)
 		intel_context_put(ce[count]);
 	}
 
-	arg->result = err;
+	return err;
 }
 
 static int __igt_reset_engines(struct intel_gt *gt,
@@ -1026,7 +1022,7 @@ static int __igt_reset_engines(struct intel_gt *gt,
 
 		memset(threads, 0, sizeof(*threads) * I915_NUM_ENGINES);
 		for_each_engine(other, gt, tmp) {
-			struct kthread_worker *worker;
+			struct task_struct *tsk;
 
 			threads[tmp].resets =
 				i915_reset_engine_count(global, other);
@@ -1040,21 +1036,19 @@ static int __igt_reset_engines(struct intel_gt *gt,
 			threads[tmp].engine = other;
 			threads[tmp].flags = flags;
 
-			worker = kthread_create_worker(0, "igt/%s",
-						       other->name);
-			if (IS_ERR(worker)) {
-				err = PTR_ERR(worker);
-				pr_err("[%s] Worker create failed: %d!\n",
-				       engine->name, err);
+			tsk = kthread_run(active_engine, &threads[tmp],
+					  "igt/%s", other->name);
+			if (IS_ERR(tsk)) {
+				err = PTR_ERR(tsk);
+				pr_err("[%s] Thread spawn failed: %d!\n", engine->name, err);
 				goto unwind;
 			}
 
-			threads[tmp].worker = worker;
-
-			kthread_init_work(&threads[tmp].work, active_engine);
-			kthread_queue_work(threads[tmp].worker,
-					   &threads[tmp].work);
+			threads[tmp].task = tsk;
+			get_task_struct(tsk);
 		}
+
+		yield(); /* start all threads before we begin */
 
 		st_engine_heartbeat_disable_no_pm(engine);
 		GEM_BUG_ON(test_and_set_bit(I915_RESET_ENGINE + id,
@@ -1203,20 +1197,17 @@ unwind:
 		for_each_engine(other, gt, tmp) {
 			int ret;
 
-			if (!threads[tmp].worker)
+			if (!threads[tmp].task)
 				continue;
 
-			WRITE_ONCE(threads[tmp].stop, true);
-			kthread_flush_work(&threads[tmp].work);
-			ret = READ_ONCE(threads[tmp].result);
+			ret = kthread_stop(threads[tmp].task);
 			if (ret) {
 				pr_err("kthread for other engine %s failed, err=%d\n",
 				       other->name, ret);
 				if (!err)
 					err = ret;
 			}
-
-			kthread_destroy_worker(threads[tmp].worker);
+			put_task_struct(threads[tmp].task);
 
 			/* GuC based resets are not logged per engine */
 			if (!using_guc) {

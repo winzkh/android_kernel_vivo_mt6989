@@ -79,7 +79,7 @@
  * Define vmemmap for pfn_to_page & page_to_pfn calls. Needed if kernel
  * is configured with CONFIG_SPARSEMEM_VMEMMAP enabled.
  */
-#define vmemmap		((struct page *)VMEMMAP_START - (phys_ram_base >> PAGE_SHIFT))
+#define vmemmap		((struct page *)VMEMMAP_START)
 
 #define PCI_IO_SIZE      SZ_16M
 #define PCI_IO_END       VMEMMAP_START
@@ -87,13 +87,9 @@
 
 #define FIXADDR_TOP      PCI_IO_START
 #ifdef CONFIG_64BIT
-#define MAX_FDT_SIZE	 PMD_SIZE
-#define FIX_FDT_SIZE	 (MAX_FDT_SIZE + SZ_2M)
-#define FIXADDR_SIZE     (PMD_SIZE + FIX_FDT_SIZE)
+#define FIXADDR_SIZE     PMD_SIZE
 #else
-#define MAX_FDT_SIZE	 PGDIR_SIZE
-#define FIX_FDT_SIZE	 MAX_FDT_SIZE
-#define FIXADDR_SIZE     (PGDIR_SIZE + FIX_FDT_SIZE)
+#define FIXADDR_SIZE     PGDIR_SIZE
 #endif
 #define FIXADDR_START    (FIXADDR_TOP - FIXADDR_SIZE)
 
@@ -165,7 +161,8 @@ extern struct pt_alloc_ops pt_ops __initdata;
 					 _PAGE_EXEC | _PAGE_WRITE)
 
 #define PAGE_COPY		PAGE_READ
-#define PAGE_COPY_EXEC		PAGE_READ_EXEC
+#define PAGE_COPY_EXEC		PAGE_EXEC
+#define PAGE_COPY_READ_EXEC	PAGE_READ_EXEC
 #define PAGE_SHARED		PAGE_WRITE
 #define PAGE_SHARED_EXEC	PAGE_WRITE_EXEC
 

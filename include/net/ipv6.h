@@ -718,8 +718,12 @@ static inline u32 ipv6_addr_hash(const struct in6_addr *a)
 /* more secured version of ipv6_addr_hash() */
 static inline u32 __ipv6_addr_jhash(const struct in6_addr *a, const u32 initval)
 {
-	return jhash2((__force const u32 *)a->s6_addr32,
-		      ARRAY_SIZE(a->s6_addr32), initval);
+	u32 v = (__force u32)a->s6_addr32[0] ^ (__force u32)a->s6_addr32[1];
+
+	return jhash_3words(v,
+			    (__force u32)a->s6_addr32[2],
+			    (__force u32)a->s6_addr32[3],
+			    initval);
 }
 
 static inline bool ipv6_addr_loopback(const struct in6_addr *a)
@@ -748,11 +752,6 @@ static inline bool ipv6_addr_v4mapped(const struct in6_addr *a)
 #endif
 		(__force unsigned long)(a->s6_addr32[2] ^
 					cpu_to_be32(0x0000ffff))) == 0UL;
-}
-
-static inline bool ipv6_addr_v4mapped_any(const struct in6_addr *a)
-{
-	return ipv6_addr_v4mapped(a) && ipv4_is_zeronet(a->s6_addr32[3]);
 }
 
 static inline bool ipv6_addr_v4mapped_loopback(const struct in6_addr *a)
@@ -1327,7 +1326,7 @@ static inline int __ip6_sock_set_addr_preferences(struct sock *sk, int val)
 	return 0;
 }
 
-static inline int ip6_sock_set_addr_preferences(struct sock *sk, int val)
+static inline int ip6_sock_set_addr_preferences(struct sock *sk, bool val)
 {
 	int ret;
 

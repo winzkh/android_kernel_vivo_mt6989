@@ -1366,7 +1366,7 @@ proto_again:
 			break;
 		}
 
-		nhoff += sizeof(struct ptp_header);
+		nhoff += ntohs(hdr->message_length);
 		fdret = FLOW_DISSECT_RET_OUT_GOOD;
 		break;
 	}
@@ -1738,7 +1738,8 @@ u32 __skb_get_hash_symmetric(const struct sk_buff *skb)
 
 	memset(&keys, 0, sizeof(keys));
 	__skb_flow_dissect(NULL, skb, &flow_keys_dissector_symmetric,
-			   &keys, NULL, 0, 0, 0, 0);
+			   &keys, NULL, 0, 0, 0,
+			   FLOW_DISSECTOR_F_STOP_AT_FLOW_LABEL);
 
 	return __flow_hash_from_keys(&keys, &hashrnd);
 }

@@ -824,15 +824,15 @@ static int intel_hw_params(struct snd_pcm_substream *substream,
 {
 	struct sdw_cdns *cdns = snd_soc_dai_get_drvdata(dai);
 	struct sdw_intel *sdw = cdns_to_intel(cdns);
-	struct sdw_cdns_dai_runtime *dai_runtime;
+	struct sdw_cdns_dma_data *dma;
 	struct sdw_cdns_pdi *pdi;
 	struct sdw_stream_config sconfig;
 	struct sdw_port_config *pconfig;
 	int ch, dir;
 	int ret;
 
-	dai_runtime = snd_soc_dai_get_dma_data(dai, substream);
-	if (!dai_runtime)
+	dma = snd_soc_dai_get_dma_data(dai, substream);
+	if (!dma)
 		return -EIO;
 
 	ch = params_channels(params);
@@ -854,9 +854,10 @@ static int intel_hw_params(struct snd_pcm_substream *substream,
 	sdw_cdns_config_stream(cdns, ch, dir, pdi);
 
 	/* store pdi and hw_params, may be needed in prepare step */
-	dai_runtime->paused = false;
-	dai_runtime->suspended = false;
-	dai_runtime->pdi = pdi;
+	dma->paused = false;
+	dma->suspended = false;
+	dma->pdi = pdi;
+	dma->hw_params = params;
 
 	/* Inform DSP about PDI stream number */
 	ret = intel_params_stream(sdw, substream->stream, dai, params,
@@ -868,7 +869,7 @@ static int intel_hw_params(struct snd_pcm_substream *substream,
 	sconfig.direction = dir;
 	sconfig.ch_count = ch;
 	sconfig.frame_rate = params_rate(params);
-	sconfig.type = dai_runtime->stream_type;
+	sconfig.type = dma->stream_type;
 
 	sconfig.bps = snd_pcm_format_width(params_format(params));
 
@@ -883,7 +884,7 @@ static int intel_hw_params(struct snd_pcm_substream *substream,
 	pconfig->ch_mask = (1 << ch) - 1;
 
 	ret = sdw_stream_add_master(&cdns->bus, &sconfig,
-				    pconfig, 1, dai_runtime->stream);
+				    pconfig, 1, dma->stream);
 	if (ret)
 		dev_err(cdns->dev, "add master to stream failed:%d\n", ret);
 
@@ -897,24 +898,19 @@ static int intel_prepare(struct snd_pcm_substream *substream,
 {
 	struct sdw_cdns *cdns = snd_soc_dai_get_drvdata(dai);
 	struct sdw_intel *sdw = cdns_to_intel(cdns);
-	struct sdw_cdns_dai_runtime *dai_runtime;
+	struct sdw_cdns_dma_data *dma;
 	int ch, dir;
 	int ret = 0;
 
-	dai_runtime = snd_soc_dai_get_dma_data(dai, substream);
-	if (!dai_runtime) {
-		dev_err(dai->dev, "failed to get dai runtime in %s\n",
+	dma = snd_soc_dai_get_dma_data(dai, substream);
+	if (!dma) {
+		dev_err(dai->dev, "failed to get dma data in %s\n",
 			__func__);
 		return -EIO;
 	}
 
-	if (dai_runtime->suspended) {
-		struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
-		struct snd_pcm_hw_params *hw_params;
-
-		hw_params = &rtd->dpcm[substream->stream].hw_params;
-
-		dai_runtime->suspended = false;
+	if (dma->suspended) {
+		dma->suspended = false;
 
 		/*
 		 * .prepare() is called after system resume, where we
@@ -925,21 +921,21 @@ static int intel_prepare(struct snd_pcm_substream *substream,
 		 */
 
 		/* configure stream */
-		ch = params_channels(hw_params);
+		ch = params_channels(dma->hw_params);
 		if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
 			dir = SDW_DATA_DIR_RX;
 		else
 			dir = SDW_DATA_DIR_TX;
 
-		intel_pdi_shim_configure(sdw, dai_runtime->pdi);
-		intel_pdi_alh_configure(sdw, dai_runtime->pdi);
-		sdw_cdns_config_stream(cdns, ch, dir, dai_runtime->pdi);
+		intel_pdi_shim_configure(sdw, dma->pdi);
+		intel_pdi_alh_configure(sdw, dma->pdi);
+		sdw_cdns_config_stream(cdns, ch, dir, dma->pdi);
 
 		/* Inform DSP about PDI stream number */
 		ret = intel_params_stream(sdw, substream->stream, dai,
-					  hw_params,
+					  dma->hw_params,
 					  sdw->instance,
-					  dai_runtime->pdi->intel_alh_id);
+					  dma->pdi->intel_alh_id);
 	}
 
 	return ret;
@@ -950,11 +946,11 @@ intel_hw_free(struct snd_pcm_substream *substream, struct snd_soc_dai *dai)
 {
 	struct sdw_cdns *cdns = snd_soc_dai_get_drvdata(dai);
 	struct sdw_intel *sdw = cdns_to_intel(cdns);
-	struct sdw_cdns_dai_runtime *dai_runtime;
+	struct sdw_cdns_dma_data *dma;
 	int ret;
 
-	dai_runtime = snd_soc_dai_get_dma_data(dai, substream);
-	if (!dai_runtime)
+	dma = snd_soc_dai_get_dma_data(dai, substream);
+	if (!dma)
 		return -EIO;
 
 	/*
@@ -963,10 +959,10 @@ intel_hw_free(struct snd_pcm_substream *substream, struct snd_soc_dai *dai)
 	 * DEPREPARED for the first cpu-dai and to RELEASED for the last
 	 * cpu-dai.
 	 */
-	ret = sdw_stream_remove_master(&cdns->bus, dai_runtime->stream);
+	ret = sdw_stream_remove_master(&cdns->bus, dma->stream);
 	if (ret < 0) {
 		dev_err(dai->dev, "remove master from stream %s failed: %d\n",
-			dai_runtime->stream->name, ret);
+			dma->stream->name, ret);
 		return ret;
 	}
 
@@ -976,7 +972,8 @@ intel_hw_free(struct snd_pcm_substream *substream, struct snd_soc_dai *dai)
 		return ret;
 	}
 
-	dai_runtime->pdi = NULL;
+	dma->hw_params = NULL;
+	dma->pdi = NULL;
 
 	return 0;
 }
@@ -999,17 +996,17 @@ static int intel_pcm_set_sdw_stream(struct snd_soc_dai *dai,
 static void *intel_get_sdw_stream(struct snd_soc_dai *dai,
 				  int direction)
 {
-	struct sdw_cdns_dai_runtime *dai_runtime;
+	struct sdw_cdns_dma_data *dma;
 
 	if (direction == SNDRV_PCM_STREAM_PLAYBACK)
-		dai_runtime = dai->playback_dma_data;
+		dma = dai->playback_dma_data;
 	else
-		dai_runtime = dai->capture_dma_data;
+		dma = dai->capture_dma_data;
 
-	if (!dai_runtime)
+	if (!dma)
 		return ERR_PTR(-EINVAL);
 
-	return dai_runtime->stream;
+	return dma->stream;
 }
 
 static int intel_trigger(struct snd_pcm_substream *substream, int cmd, struct snd_soc_dai *dai)
@@ -1017,7 +1014,7 @@ static int intel_trigger(struct snd_pcm_substream *substream, int cmd, struct sn
 	struct sdw_cdns *cdns = snd_soc_dai_get_drvdata(dai);
 	struct sdw_intel *sdw = cdns_to_intel(cdns);
 	struct sdw_intel_link_res *res = sdw->link_res;
-	struct sdw_cdns_dai_runtime *dai_runtime;
+	struct sdw_cdns_dma_data *dma;
 	int ret = 0;
 
 	/*
@@ -1028,9 +1025,9 @@ static int intel_trigger(struct snd_pcm_substream *substream, int cmd, struct sn
 	if (res->ops && res->ops->trigger)
 		res->ops->trigger(dai, cmd, substream->stream);
 
-	dai_runtime = snd_soc_dai_get_dma_data(dai, substream);
-	if (!dai_runtime) {
-		dev_err(dai->dev, "failed to get dai runtime in %s\n",
+	dma = snd_soc_dai_get_dma_data(dai, substream);
+	if (!dma) {
+		dev_err(dai->dev, "failed to get dma data in %s\n",
 			__func__);
 		return -EIO;
 	}
@@ -1045,17 +1042,17 @@ static int intel_trigger(struct snd_pcm_substream *substream, int cmd, struct sn
 		 * the .trigger callback is used to track the suspend case only.
 		 */
 
-		dai_runtime->suspended = true;
+		dma->suspended = true;
 
 		ret = intel_free_stream(sdw, substream->stream, dai, sdw->instance);
 		break;
 
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
-		dai_runtime->paused = true;
+		dma->paused = true;
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
-		dai_runtime->paused = false;
+		dma->paused = false;
 		break;
 	default:
 		break;
@@ -1094,25 +1091,25 @@ static int intel_component_dais_suspend(struct snd_soc_component *component)
 	for_each_component_dais(component, dai) {
 		struct sdw_cdns *cdns = snd_soc_dai_get_drvdata(dai);
 		struct sdw_intel *sdw = cdns_to_intel(cdns);
-		struct sdw_cdns_dai_runtime *dai_runtime;
+		struct sdw_cdns_dma_data *dma;
 		int stream;
 		int ret;
 
-		dai_runtime = dai->playback_dma_data;
+		dma = dai->playback_dma_data;
 		stream = SNDRV_PCM_STREAM_PLAYBACK;
-		if (!dai_runtime) {
-			dai_runtime = dai->capture_dma_data;
+		if (!dma) {
+			dma = dai->capture_dma_data;
 			stream = SNDRV_PCM_STREAM_CAPTURE;
 		}
 
-		if (!dai_runtime)
+		if (!dma)
 			continue;
 
-		if (dai_runtime->suspended)
+		if (dma->suspended)
 			continue;
 
-		if (dai_runtime->paused) {
-			dai_runtime->suspended = true;
+		if (dma->paused) {
+			dma->suspended = true;
 
 			ret = intel_free_stream(sdw, stream, dai, sdw->instance);
 			if (ret < 0)

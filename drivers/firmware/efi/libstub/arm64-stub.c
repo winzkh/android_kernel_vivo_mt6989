@@ -17,43 +17,20 @@
 
 static bool system_needs_vamap(void)
 {
-	const struct efi_smbios_type4_record *record;
-	const u32 __aligned(1) *socid;
-	const u8 *version;
+	const u8 *type1_family = efi_get_smbios_string(1, family);
 
 	/*
 	 * Ampere eMAG, Altra, and Altra Max machines crash in SetTime() if
-	 * SetVirtualAddressMap() has not been called prior. Most Altra systems
-	 * can be identified by the SMCCC soc ID, which is conveniently exposed
-	 * via the type 4 SMBIOS records. Otherwise, test the processor version
-	 * field. eMAG systems all appear to have the processor version field
-	 * set to "eMAG".
+	 * SetVirtualAddressMap() has not been called prior.
 	 */
-	record = (struct efi_smbios_type4_record *)efi_get_smbios_record(4);
-	if (!record)
+	if (!type1_family || (
+	    strcmp(type1_family, "eMAG") &&
+	    strcmp(type1_family, "Altra") &&
+	    strcmp(type1_family, "Altra Max")))
 		return false;
 
-	socid = (u32 *)record->processor_id;
-	switch (*socid & 0xffff000f) {
-		static char const altra[] = "Ampere(TM) Altra(TM) Processor";
-		static char const emag[] = "eMAG";
-
-	default:
-		version = efi_get_smbios_string(&record->header, 4,
-						processor_version);
-		if (!version || (strncmp(version, altra, sizeof(altra) - 1) &&
-				 strncmp(version, emag, sizeof(emag) - 1)))
-			break;
-
-		fallthrough;
-
-	case 0x0a160001:	// Altra
-	case 0x0a160002:	// Altra Max
-		efi_warn("Working around broken SetVirtualAddressMap()\n");
-		return true;
-	}
-
-	return false;
+	efi_warn("Working around broken SetVirtualAddressMap()\n");
+	return true;
 }
 
 efi_status_t check_platform_features(void)
@@ -180,8 +157,7 @@ efi_status_t handle_kernel_image(unsigned long *image_addr,
 		 * locate the kernel at a randomized offset in physical memory.
 		 */
 		status = efi_random_alloc(*reserve_size, min_kimg_align,
-					  reserve_addr, phys_seed,
-					  EFI_LOADER_CODE, 0, EFI_ALLOC_LIMIT);
+					  reserve_addr, phys_seed);
 		if (status != EFI_SUCCESS)
 			efi_warn("efi_random_alloc() failed: 0x%lx\n", status);
 	} else {
@@ -191,11 +167,10 @@ efi_status_t handle_kernel_image(unsigned long *image_addr,
 	if (status != EFI_SUCCESS) {
 		if (!check_image_region((u64)_text, kernel_memsize)) {
 			efi_err("FIRMWARE BUG: Image BSS overlaps adjacent EFI memory region\n");
-		} else if (IS_ALIGNED((u64)_text, min_kimg_align) &&
-			   (u64)_end < EFI_ALLOC_LIMIT) {
+		} else if (IS_ALIGNED((u64)_text, min_kimg_align)) {
 			/*
 			 * Just execute from wherever we were loaded by the
-			 * UEFI PE/COFF loader if the placement is suitable.
+			 * UEFI PE/COFF loader if the alignment is suitable.
 			 */
 			*image_addr = (u64)_text;
 			*reserve_size = 0;
@@ -203,8 +178,7 @@ efi_status_t handle_kernel_image(unsigned long *image_addr,
 		}
 
 		status = efi_allocate_pages_aligned(*reserve_size, reserve_addr,
-						    ULONG_MAX, min_kimg_align,
-						    EFI_LOADER_CODE);
+						    ULONG_MAX, min_kimg_align);
 
 		if (status != EFI_SUCCESS) {
 			efi_err("Failed to relocate kernel\n");

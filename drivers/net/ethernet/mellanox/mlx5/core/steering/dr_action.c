@@ -673,7 +673,6 @@ int mlx5dr_actions_build_ste_arr(struct mlx5dr_matcher *matcher,
 		switch (action_type) {
 		case DR_ACTION_TYP_DROP:
 			attr.final_icm_addr = nic_dmn->drop_icm_addr;
-			attr.hit_gvmi = nic_dmn->drop_icm_addr >> 48;
 			break;
 		case DR_ACTION_TYP_FT:
 			dest_action = action;
@@ -762,17 +761,11 @@ int mlx5dr_actions_build_ste_arr(struct mlx5dr_matcher *matcher,
 							action->sampler->tx_icm_addr;
 			break;
 		case DR_ACTION_TYP_VPORT:
-			if (unlikely(rx_rule && action->vport->caps->num == MLX5_VPORT_UPLINK)) {
-				/* can't go to uplink on RX rule - dropping instead */
-				attr.final_icm_addr = nic_dmn->drop_icm_addr;
-				attr.hit_gvmi = nic_dmn->drop_icm_addr >> 48;
-			} else {
-				attr.hit_gvmi = action->vport->caps->vhca_gvmi;
-				dest_action = action;
-				attr.final_icm_addr = rx_rule ?
-						      action->vport->caps->icm_address_rx :
-						      action->vport->caps->icm_address_tx;
-			}
+			attr.hit_gvmi = action->vport->caps->vhca_gvmi;
+			dest_action = action;
+			attr.final_icm_addr = rx_rule ?
+				action->vport->caps->icm_address_rx :
+				action->vport->caps->icm_address_tx;
 			break;
 		case DR_ACTION_TYP_POP_VLAN:
 			if (!rx_rule && !(dmn->ste_ctx->actions_caps &
@@ -1207,12 +1200,8 @@ dr_action_create_reformat_action(struct mlx5dr_domain *dmn,
 	}
 	case DR_ACTION_TYP_TNL_L3_TO_L2:
 	{
-		u8 *hw_actions;
+		u8 hw_actions[ACTION_CACHE_LINE_SIZE] = {};
 		int ret;
-
-		hw_actions = kzalloc(ACTION_CACHE_LINE_SIZE, GFP_KERNEL);
-		if (!hw_actions)
-			return -ENOMEM;
 
 		ret = mlx5dr_ste_set_action_decap_l3_list(dmn->ste_ctx,
 							  data, data_sz,
@@ -1221,7 +1210,6 @@ dr_action_create_reformat_action(struct mlx5dr_domain *dmn,
 							  &action->rewrite->num_of_actions);
 		if (ret) {
 			mlx5dr_dbg(dmn, "Failed creating decap l3 action list\n");
-			kfree(hw_actions);
 			return ret;
 		}
 
@@ -1229,7 +1217,6 @@ dr_action_create_reformat_action(struct mlx5dr_domain *dmn,
 								DR_CHUNK_SIZE_8);
 		if (!action->rewrite->chunk) {
 			mlx5dr_dbg(dmn, "Failed allocating modify header chunk\n");
-			kfree(hw_actions);
 			return -ENOMEM;
 		}
 
@@ -1243,7 +1230,6 @@ dr_action_create_reformat_action(struct mlx5dr_domain *dmn,
 		if (ret) {
 			mlx5dr_dbg(dmn, "Writing decap l3 actions to ICM failed\n");
 			mlx5dr_icm_free_chunk(action->rewrite->chunk);
-			kfree(hw_actions);
 			return ret;
 		}
 		return 0;

@@ -478,20 +478,6 @@ struct vm_area_struct {
 	};
 
 #ifdef CONFIG_PER_VMA_LOCK
-	/*
-	 * Can only be written (using WRITE_ONCE()) while holding both:
-	 *  - mmap_lock (in write mode)
-	 *  - vm_lock->lock (in write mode)
-	 * Can be read reliably while holding one of:
-	 *  - mmap_lock (in read or write mode)
-	 *  - vm_lock->lock (in read or write mode)
-	 * Can be read unreliably (using READ_ONCE()) for pessimistic bailout
-	 * while holding nothing (except RCU to keep the VMA struct allocated).
-	 *
-	 * This sequence counter is explicitly allowed to overflow; sequence
-	 * counter reuse can only lead to occasional unnecessary use of the
-	 * slowpath.
-	 */
 	int vm_lock_seq;
 	struct vma_lock *vm_lock;
 
@@ -632,20 +618,6 @@ struct mm_struct {
 					  * by mmlist_lock
 					  */
 #ifdef CONFIG_PER_VMA_LOCK
-		/*
-		 * This field has lock-like semantics, meaning it is sometimes
-		 * accessed with ACQUIRE/RELEASE semantics.
-		 * Roughly speaking, incrementing the sequence number is
-		 * equivalent to releasing locks on VMAs; reading the sequence
-		 * number can be part of taking a read lock on a VMA.
-		 *
-		 * Can be modified under write mmap_lock using RELEASE
-		 * semantics.
-		 * Can be read with no other protection when holding write
-		 * mmap_lock.
-		 * Can be read with ACQUIRE semantics if not holding write
-		 * mmap_lock.
-		 */
 		int mm_lock_seq;
 #endif
 
@@ -970,8 +942,7 @@ enum vm_fault_reason {
 	{ VM_FAULT_RETRY,               "RETRY" },	\
 	{ VM_FAULT_FALLBACK,            "FALLBACK" },	\
 	{ VM_FAULT_DONE_COW,            "DONE_COW" },	\
-	{ VM_FAULT_NEEDDSYNC,           "NEEDDSYNC" },	\
-	{ VM_FAULT_COMPLETED,           "COMPLETED" }
+	{ VM_FAULT_NEEDDSYNC,           "NEEDDSYNC" }
 
 struct vm_special_mapping {
 	const char *name;	/* The name, e.g. "[vdso]". */

@@ -31,7 +31,6 @@
 #include <linux/pci.h>
 #include <linux/pkt_sched.h>
 #include <linux/types.h>
-#include <linux/bitmap.h>
 #include <net/pkt_cls.h>
 
 #define HNAE3_MOD_VERSION "1.0"
@@ -403,7 +402,7 @@ struct hnae3_ae_dev {
 	unsigned long hw_err_reset_req;
 	struct hnae3_dev_specs dev_specs;
 	u32 dev_version;
-	DECLARE_BITMAP(caps, HNAE3_DEV_CAPS_MAX_NUM);
+	unsigned long caps[BITS_TO_LONGS(HNAE3_DEV_CAPS_MAX_NUM)];
 	void *priv;
 };
 
@@ -797,7 +796,6 @@ struct hnae3_tc_info {
 	u8 max_tc; /* Total number of TCs */
 	u8 num_tc; /* Total number of enabled TCs */
 	bool mqprio_active;
-	bool dcb_ets_active;
 };
 
 #define HNAE3_MAX_DSCP			64

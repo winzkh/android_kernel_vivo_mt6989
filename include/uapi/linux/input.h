@@ -186,20 +186,6 @@ struct input_mask {
 #define EVIOCGRAB		_IOW('E', 0x90, int)			/* Grab/Release device */
 #define EVIOCREVOKE		_IOW('E', 0x91, int)			/* Revoke device access */
 
-#define KEY_WAKEUP_SWIPE  			249
-#define KEY_TS_LARGE_SUPPRESSION  	250
-#define KEY_BAR_SWIPE  				251  /*  TS add for down_bar swipe */
-#define KEY_CUSTOM_GESTURE  		252     /*  TS add for custom gesture key */
-#define KEY_FINGERPRINT_KEY       	253 /*  TS add for fingerswipe key */
-#define KEY_FINGERPRINT_WAKE        254 /*  GongYulong add for fingerprint wakeup key */
-#define KEY_FINGERPRINT_SCREENSHOT  0x252   /* For fingerprint screenshot */
-#define KEY_SYSTEM_NAVIGATION_UP 0x253      /* For fingerprint navigation */
-#define KEY_SYSTEM_NAVIGATION_DOWN 0x254    /* For fingerprint navigation */
-#define KEY_SYSTEM_NAVIGATION_LEFT 0x255    /* For fingerprint navigation */
-#define KEY_SYSTEM_NAVIGATION_RIGHT 0x256   /* For fingerprint navigation */
-#define KEY_SYSTEM_NAVIGATION_CLICK 0x257   /* For fingerprint navigation */
-#define KEY_FINGERPRINT_WAKE_DFP 0x259      /* fingerprint team add for fingerprint wakeup key */
-
 /**
  * EVIOCGMASK - Retrieve current event mask
  *

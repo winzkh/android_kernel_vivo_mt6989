@@ -127,9 +127,8 @@ retry:
 		if (address + PAGE_SIZE < regs->sp)
 			goto bad_area;
 	}
-	vma = expand_stack(mm, address);
-	if (!vma)
-		goto bad_area_nosemaphore;
+	if (expand_stack(vma, address))
+		goto bad_area;
 
 	/*
 	 * Ok, we have a good vm_area for this memory access, so

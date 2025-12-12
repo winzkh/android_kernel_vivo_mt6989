@@ -21,7 +21,6 @@
 #include "builtin.h"
 #include "bench/bench.h"
 
-#include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -257,7 +256,6 @@ int cmd_bench(int argc, const char **argv)
 
 	/* Unbuffered output */
 	setvbuf(stdout, NULL, _IONBF, 0);
-	setlocale(LC_ALL, "");
 
 	if (argc < 2) {
 		/* No collection specified. */

@@ -405,18 +405,6 @@ unsigned long nilfs_nrsvsegs(struct the_nilfs *nilfs, unsigned long nsegs)
 				  100));
 }
 
-/**
- * nilfs_max_segment_count - calculate the maximum number of segments
- * @nilfs: nilfs object
- */
-static u64 nilfs_max_segment_count(struct the_nilfs *nilfs)
-{
-	u64 max_count = U64_MAX;
-
-	do_div(max_count, nilfs->ns_blocks_per_segment);
-	return min_t(u64, max_count, ULONG_MAX);
-}
-
 void nilfs_set_nsegments(struct the_nilfs *nilfs, unsigned long nsegs)
 {
 	nilfs->ns_nsegments = nsegs;
@@ -426,8 +414,6 @@ void nilfs_set_nsegments(struct the_nilfs *nilfs, unsigned long nsegs)
 static int nilfs_store_disk_layout(struct the_nilfs *nilfs,
 				   struct nilfs_super_block *sbp)
 {
-	u64 nsegments, nblocks;
-
 	if (le32_to_cpu(sbp->s_rev_level) < NILFS_MIN_SUPP_REV) {
 		nilfs_err(nilfs->ns_sb,
 			  "unsupported revision (superblock rev.=%d.%d, current rev.=%d.%d). Please check the version of mkfs.nilfs(2).",
@@ -471,34 +457,7 @@ static int nilfs_store_disk_layout(struct the_nilfs *nilfs,
 		return -EINVAL;
 	}
 
-	nsegments = le64_to_cpu(sbp->s_nsegments);
-	if (nsegments > nilfs_max_segment_count(nilfs)) {
-		nilfs_err(nilfs->ns_sb,
-			  "segment count %llu exceeds upper limit (%llu segments)",
-			  (unsigned long long)nsegments,
-			  (unsigned long long)nilfs_max_segment_count(nilfs));
-		return -EINVAL;
-	}
-
-	nblocks = sb_bdev_nr_blocks(nilfs->ns_sb);
-	if (nblocks) {
-		u64 min_block_count = nsegments * nilfs->ns_blocks_per_segment;
-		/*
-		 * To avoid failing to mount early device images without a
-		 * second superblock, exclude that block count from the
-		 * "min_block_count" calculation.
-		 */
-
-		if (nblocks < min_block_count) {
-			nilfs_err(nilfs->ns_sb,
-				  "total number of segment blocks %llu exceeds device size (%llu blocks)",
-				  (unsigned long long)min_block_count,
-				  (unsigned long long)nblocks);
-			return -EINVAL;
-		}
-	}
-
-	nilfs_set_nsegments(nilfs, nsegments);
+	nilfs_set_nsegments(nilfs, le64_to_cpu(sbp->s_nsegments));
 	nilfs->ns_crc_seed = le32_to_cpu(sbp->s_crc_seed);
 	return 0;
 }
@@ -716,11 +675,7 @@ int init_nilfs(struct the_nilfs *nilfs, struct super_block *sb, char *data)
 			goto failed_sbh;
 		}
 		nilfs_release_super_block(nilfs);
-		if (!sb_set_blocksize(sb, blocksize)) {
-			nilfs_err(sb, "bad blocksize %d", blocksize);
-			err = -EINVAL;
-			goto out;
-		}
+		sb_set_blocksize(sb, blocksize);
 
 		err = nilfs_load_super_block(nilfs, sb, blocksize, &sbp);
 		if (err)

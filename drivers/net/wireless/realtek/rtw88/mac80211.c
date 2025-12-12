@@ -88,6 +88,15 @@ static int rtw_ops_config(struct ieee80211_hw *hw, u32 changed)
 		}
 	}
 
+	if (changed & IEEE80211_CONF_CHANGE_PS) {
+		if (hw->conf.flags & IEEE80211_CONF_PS) {
+			rtwdev->ps_enabled = true;
+		} else {
+			rtwdev->ps_enabled = false;
+			rtw_leave_lps(rtwdev);
+		}
+	}
+
 	if (changed & IEEE80211_CONF_CHANGE_CHANNEL)
 		rtw_set_channel(rtwdev);
 
@@ -197,7 +206,6 @@ static int rtw_ops_add_interface(struct ieee80211_hw *hw,
 	rtwvif->bcn_ctrl = bcn_ctrl;
 	config |= PORT_SET_BCN_CTRL;
 	rtw_vif_port_config(rtwdev, rtwvif, config);
-	rtw_recalc_lps(rtwdev, vif);
 
 	mutex_unlock(&rtwdev->mutex);
 
@@ -228,7 +236,6 @@ static void rtw_ops_remove_interface(struct ieee80211_hw *hw,
 	rtwvif->bcn_ctrl = 0;
 	config |= PORT_SET_BCN_CTRL;
 	rtw_vif_port_config(rtwdev, rtwvif, config);
-	rtw_recalc_lps(rtwdev, NULL);
 
 	mutex_unlock(&rtwdev->mutex);
 }
@@ -266,9 +273,9 @@ static void rtw_ops_configure_filter(struct ieee80211_hw *hw,
 
 	if (changed_flags & FIF_ALLMULTI) {
 		if (*new_flags & FIF_ALLMULTI)
-			rtwdev->hal.rcr |= BIT_AM;
+			rtwdev->hal.rcr |= BIT_AM | BIT_AB;
 		else
-			rtwdev->hal.rcr &= ~(BIT_AM);
+			rtwdev->hal.rcr &= ~(BIT_AM | BIT_AB);
 	}
 	if (changed_flags & FIF_FCSFAIL) {
 		if (*new_flags & FIF_FCSFAIL)
@@ -420,9 +427,6 @@ static void rtw_ops_bss_info_changed(struct ieee80211_hw *hw,
 
 	if (changed & BSS_CHANGED_ERP_SLOT)
 		rtw_conf_tx(rtwdev, rtwvif);
-
-	if (changed & BSS_CHANGED_PS)
-		rtw_recalc_lps(rtwdev, NULL);
 
 	rtw_vif_port_config(rtwdev, rtwvif, config);
 
@@ -887,7 +891,7 @@ static void rtw_ops_sta_rc_update(struct ieee80211_hw *hw,
 	struct rtw_sta_info *si = (struct rtw_sta_info *)sta->drv_priv;
 
 	if (changed & IEEE80211_RC_BW_CHANGED)
-		ieee80211_queue_work(rtwdev->hw, &si->rc_work);
+		rtw_update_sta_info(rtwdev, si, true);
 }
 
 const struct ieee80211_ops rtw_ops = {

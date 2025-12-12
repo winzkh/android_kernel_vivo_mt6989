@@ -78,19 +78,13 @@ struct amdgpu_mman {
 	/* discovery */
 	uint8_t				*discovery_bin;
 	uint32_t			discovery_tmr_size;
-	/* fw reserved memory */
-	struct amdgpu_bo		*fw_reserved_memory;
+	struct amdgpu_bo		*discovery_memory;
 
 	/* firmware VRAM reservation */
 	u64		fw_vram_usage_start_offset;
 	u64		fw_vram_usage_size;
 	struct amdgpu_bo	*fw_vram_usage_reserved_bo;
 	void		*fw_vram_usage_va;
-
-	/* driver VRAM reservation */
-	u64		drv_vram_usage_start_offset;
-	u64		drv_vram_usage_size;
-	struct amdgpu_bo	*drv_vram_usage_reserved_bo;
 
 	/* PAGE_SIZE'd BO for process memory r/w over SDMA. */
 	struct amdgpu_bo	*sdma_access_bo;

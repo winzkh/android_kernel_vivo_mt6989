@@ -296,7 +296,7 @@ void dma_resv_add_fence(struct dma_resv *obj, struct dma_fence *fence,
 
 		dma_resv_list_entry(fobj, i, obj, &old, &old_usage);
 		if ((old->context == fence->context && old_usage >= usage &&
-		     dma_fence_is_later_or_same(fence, old)) ||
+		     dma_fence_is_later(fence, old)) ||
 		    dma_fence_is_signaled(old)) {
 			dma_resv_list_set(fobj, i, fence, usage);
 			dma_fence_put(old);
@@ -566,7 +566,6 @@ int dma_resv_get_fences(struct dma_resv *obj, enum dma_resv_usage usage,
 	dma_resv_for_each_fence_unlocked(&cursor, fence) {
 
 		if (dma_resv_iter_is_restarted(&cursor)) {
-			struct dma_fence **new_fences;
 			unsigned int count;
 
 			while (*num_fences)
@@ -575,17 +574,13 @@ int dma_resv_get_fences(struct dma_resv *obj, enum dma_resv_usage usage,
 			count = cursor.num_fences + 1;
 
 			/* Eventually re-allocate the array */
-			new_fences = krealloc_array(*fences, count,
-						    sizeof(void *),
-						    GFP_KERNEL);
-			if (count && !new_fences) {
-				kfree(*fences);
-				*fences = NULL;
-				*num_fences = 0;
+			*fences = krealloc_array(*fences, count,
+						 sizeof(void *),
+						 GFP_KERNEL);
+			if (count && !*fences) {
 				dma_resv_iter_end(&cursor);
 				return -ENOMEM;
 			}
-			*fences = new_fences;
 		}
 
 		(*fences)[(*num_fences)++] = dma_fence_get(fence);

@@ -1285,6 +1285,9 @@ static inline int gfs2_ail_flush_reqd(struct gfs2_sbd *sdp)
 {
 	unsigned int used_blocks = sdp->sd_jdesc->jd_blocks - atomic_read(&sdp->sd_log_blks_free);
 
+	if (test_and_clear_bit(SDF_FORCE_AIL_FLUSH, &sdp->sd_flags))
+		return 1;
+
 	return used_blocks + atomic_read(&sdp->sd_log_blks_needed) >=
 		atomic_read(&sdp->sd_log_thresh2);
 }
@@ -1301,6 +1304,7 @@ int gfs2_logd(void *data)
 {
 	struct gfs2_sbd *sdp = data;
 	unsigned long t = 1;
+	DEFINE_WAIT(wait);
 
 	while (!kthread_should_stop()) {
 
@@ -1325,9 +1329,7 @@ int gfs2_logd(void *data)
 						  GFS2_LFC_LOGD_JFLUSH_REQD);
 		}
 
-		if (test_bit(SDF_FORCE_AIL_FLUSH, &sdp->sd_flags) ||
-		    gfs2_ail_flush_reqd(sdp)) {
-			clear_bit(SDF_FORCE_AIL_FLUSH, &sdp->sd_flags);
+		if (gfs2_ail_flush_reqd(sdp)) {
 			gfs2_ail1_start(sdp);
 			gfs2_ail1_wait(sdp);
 			gfs2_ail1_empty(sdp, 0);
@@ -1339,12 +1341,17 @@ int gfs2_logd(void *data)
 
 		try_to_freeze();
 
-		t = wait_event_interruptible_timeout(sdp->sd_logd_waitq,
-				test_bit(SDF_FORCE_AIL_FLUSH, &sdp->sd_flags) ||
-				gfs2_ail_flush_reqd(sdp) ||
-				gfs2_jrnl_flush_reqd(sdp) ||
-				kthread_should_stop(),
-				t);
+		do {
+			prepare_to_wait(&sdp->sd_logd_waitq, &wait,
+					TASK_INTERRUPTIBLE);
+			if (!gfs2_ail_flush_reqd(sdp) &&
+			    !gfs2_jrnl_flush_reqd(sdp) &&
+			    !kthread_should_stop())
+				t = schedule_timeout(t);
+		} while(t && !gfs2_ail_flush_reqd(sdp) &&
+			!gfs2_jrnl_flush_reqd(sdp) &&
+			!kthread_should_stop());
+		finish_wait(&sdp->sd_logd_waitq, &wait);
 	}
 
 	return 0;

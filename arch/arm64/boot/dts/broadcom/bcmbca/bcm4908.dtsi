@@ -180,6 +180,9 @@
 				brcm,num-gphy = <5>;
 				brcm,num-rgmii-ports = <2>;
 
+				#address-cells = <1>;
+				#size-cells = <0>;
+
 				ports: ports {
 					#address-cells = <1>;
 					#size-cells = <0>;
@@ -250,7 +253,7 @@
 			};
 		};
 
-		procmon: bus@280000 {
+		procmon: syscon@280000 {
 			compatible = "simple-bus";
 			reg = <0x280000 0x1000>;
 			ranges;
@@ -529,7 +532,7 @@
 			reg = <0x1800 0x600>, <0x2000 0x10>;
 			reg-names = "nand", "nand-int-base";
 			interrupts = <GIC_SPI 37 IRQ_TYPE_LEVEL_HIGH>;
-			interrupt-names = "nand_ctlrdy";
+			interrupt-names = "nand";
 			status = "okay";
 
 			nandcs: nand@0 {

@@ -455,8 +455,7 @@ static int mt7915_config(struct ieee80211_hw *hw, u32 changed)
 		ieee80211_wake_queues(hw);
 	}
 
-	if (changed & (IEEE80211_CONF_CHANGE_POWER |
-		       IEEE80211_CONF_CHANGE_CHANNEL)) {
+	if (changed & IEEE80211_CONF_CHANGE_POWER) {
 		ret = mt7915_mcu_set_txpower_sku(phy);
 		if (ret)
 			return ret;

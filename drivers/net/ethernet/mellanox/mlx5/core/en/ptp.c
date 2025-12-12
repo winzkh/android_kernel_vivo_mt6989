@@ -175,8 +175,6 @@ static bool mlx5e_ptp_poll_ts_cq(struct mlx5e_cq *cq, int budget)
 	/* ensure cq space is freed before enabling more cqes */
 	wmb();
 
-	mlx5e_txqsq_wake(&ptpsq->txqsq);
-
 	return work_done == budget;
 }
 
@@ -729,10 +727,8 @@ int mlx5e_ptp_open(struct mlx5e_priv *priv, struct mlx5e_params *params,
 
 	c = kvzalloc_node(sizeof(*c), GFP_KERNEL, dev_to_node(mlx5_core_dma_dev(mdev)));
 	cparams = kvzalloc(sizeof(*cparams), GFP_KERNEL);
-	if (!c || !cparams) {
-		err = -ENOMEM;
-		goto err_free;
-	}
+	if (!c || !cparams)
+		return -ENOMEM;
 
 	c->priv     = priv;
 	c->mdev     = priv->mdev;

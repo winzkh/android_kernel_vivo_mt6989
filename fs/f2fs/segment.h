@@ -573,22 +573,23 @@ static inline bool has_curseg_enough_space(struct f2fs_sb_info *sbi,
 			unsigned int node_blocks, unsigned int dent_blocks)
 {
 
-	unsigned segno, left_blocks;
+	unsigned int segno, left_blocks;
 	int i;
 
-	/* check current node sections in the worst case. */
+	/* check current node segment */
 	for (i = CURSEG_HOT_NODE; i <= CURSEG_COLD_NODE; i++) {
 		segno = CURSEG_I(sbi, i)->segno;
-		left_blocks = CAP_BLKS_PER_SEC(sbi) -
-				get_ckpt_valid_blocks(sbi, segno, true);
+		left_blocks = f2fs_usable_blks_in_seg(sbi, segno) -
+				get_seg_entry(sbi, segno)->ckpt_valid_blocks;
+
 		if (node_blocks > left_blocks)
 			return false;
 	}
 
-	/* check current data section for dentry blocks. */
+	/* check current data segment */
 	segno = CURSEG_I(sbi, CURSEG_HOT_DATA)->segno;
-	left_blocks = CAP_BLKS_PER_SEC(sbi) -
-			get_ckpt_valid_blocks(sbi, segno, true);
+	left_blocks = f2fs_usable_blks_in_seg(sbi, segno) -
+			get_seg_entry(sbi, segno)->ckpt_valid_blocks;
 	if (dent_blocks > left_blocks)
 		return false;
 	return true;
@@ -637,7 +638,7 @@ static inline bool has_not_enough_free_secs(struct f2fs_sb_info *sbi,
 
 	if (free_secs > upper_secs)
 		return false;
-	if (free_secs <= lower_secs)
+	else if (free_secs <= lower_secs)
 		return true;
 	return !curseg_space;
 }
@@ -648,29 +649,11 @@ static inline bool has_enough_free_secs(struct f2fs_sb_info *sbi,
 	return !has_not_enough_free_secs(sbi, freed, needed);
 }
 
-static inline bool has_enough_free_blks(struct f2fs_sb_info *sbi)
-{
-	unsigned int total_free_blocks = 0;
-	unsigned int avail_user_block_count;
-
-	spin_lock(&sbi->stat_lock);
-
-	avail_user_block_count = get_available_block_count(sbi, NULL, true);
-	total_free_blocks = avail_user_block_count - (unsigned int)valid_user_blocks(sbi);
-
-	spin_unlock(&sbi->stat_lock);
-
-	return total_free_blocks > 0;
-}
-
 static inline bool f2fs_is_checkpoint_ready(struct f2fs_sb_info *sbi)
 {
 	if (likely(!is_sbi_flag_set(sbi, SBI_CP_DISABLED)))
 		return true;
 	if (likely(has_enough_free_secs(sbi, 0, 0)))
-		return true;
-	if (!f2fs_lfs_mode(sbi) &&
-		likely(has_enough_free_blks(sbi)))
 		return true;
 	return false;
 }

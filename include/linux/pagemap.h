@@ -137,8 +137,6 @@ static inline bool mapping_empty(struct address_space *mapping)
 	return xa_empty(&mapping->i_pages);
 }
 
-extern void _trace_android_rvh_mapping_shrinkable(bool *shrinkable);
-
 /*
  * mapping_shrinkable - test if page cache state allows inode reclaim
  * @mapping: the page cache mapping
@@ -163,11 +161,7 @@ extern void _trace_android_rvh_mapping_shrinkable(bool *shrinkable);
 static inline bool mapping_shrinkable(struct address_space *mapping)
 {
 	void *head;
-	bool shrinkable = false;
 
-	_trace_android_rvh_mapping_shrinkable(&shrinkable);
-	if (shrinkable)
-		return true;
 	/*
 	 * On highmem systems, there could be lowmem pressure from the
 	 * inodes before there is highmem pressure from the page
@@ -205,9 +199,6 @@ enum mapping_flags {
 	/* writeback related tags are not used */
 	AS_NO_WRITEBACK_TAGS = 5,
 	AS_LARGE_FOLIO_SUPPORT = 6,
-	AS_RELEASE_ALWAYS,	/* Call ->release_folio(), even if no private data */
-	AS_STABLE_WRITES,	/* must wait for writeback before modifying
-				   folio contents */
 };
 
 /**
@@ -276,36 +267,6 @@ static inline void mapping_set_no_writeback_tags(struct address_space *mapping)
 static inline int mapping_use_writeback_tags(struct address_space *mapping)
 {
 	return !test_bit(AS_NO_WRITEBACK_TAGS, &mapping->flags);
-}
-
-static inline bool mapping_release_always(const struct address_space *mapping)
-{
-	return test_bit(AS_RELEASE_ALWAYS, &mapping->flags);
-}
-
-static inline void mapping_set_release_always(struct address_space *mapping)
-{
-	set_bit(AS_RELEASE_ALWAYS, &mapping->flags);
-}
-
-static inline void mapping_clear_release_always(struct address_space *mapping)
-{
-	clear_bit(AS_RELEASE_ALWAYS, &mapping->flags);
-}
-
-static inline bool mapping_stable_writes(const struct address_space *mapping)
-{
-	return test_bit(AS_STABLE_WRITES, &mapping->flags);
-}
-
-static inline void mapping_set_stable_writes(struct address_space *mapping)
-{
-	set_bit(AS_STABLE_WRITES, &mapping->flags);
-}
-
-static inline void mapping_clear_stable_writes(struct address_space *mapping)
-{
-	clear_bit(AS_STABLE_WRITES, &mapping->flags);
 }
 
 static inline gfp_t mapping_gfp_mask(struct address_space * mapping)
@@ -761,8 +722,6 @@ unsigned filemap_get_folios(struct address_space *mapping, pgoff_t *start,
 		pgoff_t end, struct folio_batch *fbatch);
 unsigned filemap_get_folios_contig(struct address_space *mapping,
 		pgoff_t *start, pgoff_t end, struct folio_batch *fbatch);
-unsigned filemap_get_folios_tag(struct address_space *mapping, pgoff_t *start,
-		pgoff_t end, xa_mark_t tag, struct folio_batch *fbatch);
 unsigned find_get_pages_range_tag(struct address_space *mapping, pgoff_t *index,
 			pgoff_t end, xa_mark_t tag, unsigned int nr_pages,
 			struct page **pages);
@@ -923,7 +882,8 @@ static inline bool wake_page_match(struct wait_page_queue *wait_page,
 
 void __folio_lock(struct folio *folio);
 int __folio_lock_killable(struct folio *folio);
-vm_fault_t __folio_lock_or_retry(struct folio *folio, struct vm_fault *vmf);
+bool __folio_lock_or_retry(struct folio *folio, struct mm_struct *mm,
+				unsigned int flags);
 void unlock_page(struct page *page);
 void folio_unlock(struct folio *folio);
 
@@ -1037,13 +997,11 @@ static inline int lock_page_killable(struct page *page)
  * Return value and mmap_lock implications depend on flags; see
  * __folio_lock_or_retry().
  */
-static inline vm_fault_t folio_lock_or_retry(struct folio *folio,
-					     struct vm_fault *vmf)
+static inline bool folio_lock_or_retry(struct folio *folio,
+		struct mm_struct *mm, unsigned int flags)
 {
 	might_sleep();
-	if (!folio_trylock(folio))
-		return __folio_lock_or_retry(folio, vmf);
-	return 0;
+	return folio_trylock(folio) || __folio_lock_or_retry(folio, mm, flags);
 }
 
 /*

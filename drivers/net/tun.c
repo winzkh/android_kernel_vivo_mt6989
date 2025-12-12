@@ -653,7 +653,6 @@ static void __tun_detach(struct tun_file *tfile, bool clean)
 				   tun->tfiles[tun->numqueues - 1]);
 		ntfile = rtnl_dereference(tun->tfiles[index]);
 		ntfile->queue_index = index;
-		ntfile->xdp_rxq.queue_index = index;
 		rcu_assign_pointer(tun->tfiles[tun->numqueues - 1],
 				   NULL);
 
@@ -1589,7 +1588,7 @@ static bool tun_can_build_skb(struct tun_struct *tun, struct tun_file *tfile,
 	if (zerocopy)
 		return false;
 
-	if (SKB_DATA_ALIGN(len + TUN_RX_PAD + XDP_PACKET_HEADROOM) +
+	if (SKB_DATA_ALIGN(len + TUN_RX_PAD) +
 	    SKB_DATA_ALIGN(sizeof(struct skb_shared_info)) > PAGE_SIZE)
 		return false;
 
@@ -1623,19 +1622,13 @@ static int tun_xdp_act(struct tun_struct *tun, struct bpf_prog *xdp_prog,
 	switch (act) {
 	case XDP_REDIRECT:
 		err = xdp_do_redirect(tun->dev, xdp, xdp_prog);
-		if (err) {
-			dev_core_stats_rx_dropped_inc(tun->dev);
+		if (err)
 			return err;
-		}
-		dev_sw_netstats_rx_add(tun->dev, xdp->data_end - xdp->data);
 		break;
 	case XDP_TX:
 		err = tun_xdp_tx(tun->dev, xdp);
-		if (err < 0) {
-			dev_core_stats_rx_dropped_inc(tun->dev);
+		if (err < 0)
 			return err;
-		}
-		dev_sw_netstats_rx_add(tun->dev, xdp->data_end - xdp->data);
 		break;
 	case XDP_PASS:
 		break;
@@ -1755,7 +1748,7 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 	u32 rxhash = 0;
 	int skb_xdp = 1;
 	bool frags = tun_napi_frags_enabled(tfile);
-	enum skb_drop_reason drop_reason = SKB_DROP_REASON_NOT_SPECIFIED;
+	enum skb_drop_reason drop_reason;
 
 	if (!(tun->flags & IFF_NO_PI)) {
 		if (len < sizeof(pi))
@@ -1816,9 +1809,10 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 		 * skb was created with generic XDP routine.
 		 */
 		skb = tun_build_skb(tun, tfile, from, &gso, len, &skb_xdp);
-		err = PTR_ERR_OR_ZERO(skb);
-		if (err)
-			goto drop;
+		if (IS_ERR(skb)) {
+			dev_core_stats_rx_dropped_inc(tun->dev);
+			return PTR_ERR(skb);
+		}
 		if (!skb)
 			return total_len;
 	} else {
@@ -1843,9 +1837,13 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 					    noblock);
 		}
 
-		err = PTR_ERR_OR_ZERO(skb);
-		if (err)
-			goto drop;
+		if (IS_ERR(skb)) {
+			if (PTR_ERR(skb) != -EAGAIN)
+				dev_core_stats_rx_dropped_inc(tun->dev);
+			if (frags)
+				mutex_unlock(&tfile->napi_mutex);
+			return PTR_ERR(skb);
+		}
 
 		if (zerocopy)
 			err = zerocopy_sg_from_iter(skb, from);
@@ -1855,14 +1853,27 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 		if (err) {
 			err = -EFAULT;
 			drop_reason = SKB_DROP_REASON_SKB_UCOPY_FAULT;
-			goto drop;
+drop:
+			dev_core_stats_rx_dropped_inc(tun->dev);
+			kfree_skb_reason(skb, drop_reason);
+			if (frags) {
+				tfile->napi.skb = NULL;
+				mutex_unlock(&tfile->napi_mutex);
+			}
+
+			return err;
 		}
 	}
 
 	if (virtio_net_hdr_to_skb(skb, &gso, tun_is_little_endian(tun))) {
 		atomic_long_inc(&tun->rx_frame_errors);
-		err = -EINVAL;
-		goto free_skb;
+		kfree_skb(skb);
+		if (frags) {
+			tfile->napi.skb = NULL;
+			mutex_unlock(&tfile->napi_mutex);
+		}
+
+		return -EINVAL;
 	}
 
 	switch (tun->flags & TUN_TYPE_MASK) {
@@ -1878,8 +1889,9 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 				pi.proto = htons(ETH_P_IPV6);
 				break;
 			default:
-				err = -EINVAL;
-				goto drop;
+				dev_core_stats_rx_dropped_inc(tun->dev);
+				kfree_skb(skb);
+				return -EINVAL;
 			}
 		}
 
@@ -1921,7 +1933,11 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 			if (ret != XDP_PASS) {
 				rcu_read_unlock();
 				local_bh_enable();
-				goto unlock_frags;
+				if (frags) {
+					tfile->napi.skb = NULL;
+					mutex_unlock(&tfile->napi_mutex);
+				}
+				return total_len;
 			}
 		}
 		rcu_read_unlock();
@@ -1978,14 +1994,6 @@ napi_busy:
 		int queue_len;
 
 		spin_lock_bh(&queue->lock);
-
-		if (unlikely(tfile->detached)) {
-			spin_unlock_bh(&queue->lock);
-			rcu_read_unlock();
-			err = -EBUSY;
-			goto free_skb;
-		}
-
 		__skb_queue_tail(queue, skb);
 		queue_len = skb_queue_len(queue);
 		spin_unlock(&queue->lock);
@@ -2009,22 +2017,6 @@ napi_busy:
 		tun_flow_update(tun, rxhash, tfile);
 
 	return total_len;
-
-drop:
-	if (err != -EAGAIN)
-		dev_core_stats_rx_dropped_inc(tun->dev);
-
-free_skb:
-	if (!IS_ERR_OR_NULL(skb))
-		kfree_skb_reason(skb, drop_reason);
-
-unlock_frags:
-	if (frags) {
-		tfile->napi.skb = NULL;
-		mutex_unlock(&tfile->napi_mutex);
-	}
-
-	return err ?: total_len;
 }
 
 static ssize_t tun_chr_write_iter(struct kiocb *iocb, struct iov_iter *from)
@@ -2521,13 +2513,6 @@ build:
 	if (tfile->napi_enabled) {
 		queue = &tfile->sk.sk_write_queue;
 		spin_lock(&queue->lock);
-
-		if (unlikely(tfile->detached)) {
-			spin_unlock(&queue->lock);
-			kfree_skb(skb);
-			return -EBUSY;
-		}
-
 		__skb_queue_tail(queue, skb);
 		spin_unlock(&queue->lock);
 		ret = 1;
@@ -3063,11 +3048,10 @@ static long __tun_chr_ioctl(struct file *file, unsigned int cmd,
 	struct net *net = sock_net(&tfile->sk);
 	struct tun_struct *tun;
 	void __user* argp = (void __user*)arg;
-	unsigned int carrier;
+	unsigned int ifindex, carrier;
 	struct ifreq ifr;
 	kuid_t owner;
 	kgid_t group;
-	int ifindex;
 	int sndbuf;
 	int vnet_hdr_sz;
 	int le;
@@ -3123,9 +3107,7 @@ static long __tun_chr_ioctl(struct file *file, unsigned int cmd,
 		ret = -EFAULT;
 		if (copy_from_user(&ifindex, argp, sizeof(ifindex)))
 			goto unlock;
-		ret = -EINVAL;
-		if (ifindex < 0)
-			goto unlock;
+
 		ret = 0;
 		tfile->ifindex = ifindex;
 		goto unlock;
@@ -3467,7 +3449,7 @@ static int tun_chr_open(struct inode *inode, struct file * file)
 	tfile->socket.file = file;
 	tfile->socket.ops = &tun_socket_ops;
 
-	sock_init_data_uid(&tfile->socket, &tfile->sk, current_fsuid());
+	sock_init_data_uid(&tfile->socket, &tfile->sk, inode->i_uid);
 
 	tfile->sk.sk_write_space = tun_sock_write_space;
 	tfile->sk.sk_sndbuf = INT_MAX;

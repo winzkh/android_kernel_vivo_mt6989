@@ -329,7 +329,7 @@ static int xpcs_read_fault_c73(struct dw_xpcs *xpcs,
 	return 0;
 }
 
-static int xpcs_read_link_c73(struct dw_xpcs *xpcs)
+static int xpcs_read_link_c73(struct dw_xpcs *xpcs, bool an)
 {
 	bool link = true;
 	int ret;
@@ -340,6 +340,15 @@ static int xpcs_read_link_c73(struct dw_xpcs *xpcs)
 
 	if (!(ret & MDIO_STAT1_LSTATUS))
 		link = false;
+
+	if (an) {
+		ret = xpcs_read(xpcs, MDIO_MMD_AN, MDIO_STAT1);
+		if (ret < 0)
+			return ret;
+
+		if (!(ret & MDIO_STAT1_LSTATUS))
+			link = false;
+	}
 
 	return link;
 }
@@ -881,7 +890,7 @@ int xpcs_do_config(struct dw_xpcs *xpcs, phy_interface_t interface,
 
 	switch (compat->an_mode) {
 	case DW_AN_C73:
-		if (test_bit(ETHTOOL_LINK_MODE_Autoneg_BIT, advertising)) {
+		if (phylink_autoneg_inband(mode)) {
 			ret = xpcs_config_aneg_c73(xpcs, compat);
 			if (ret)
 				return ret;
@@ -934,7 +943,7 @@ static int xpcs_get_state_c73(struct dw_xpcs *xpcs,
 	int ret;
 
 	/* Link needs to be read first ... */
-	state->link = xpcs_read_link_c73(xpcs) > 0 ? 1 : 0;
+	state->link = xpcs_read_link_c73(xpcs, state->an_enabled) > 0 ? 1 : 0;
 
 	/* ... and then we check the faults. */
 	ret = xpcs_read_fault_c73(xpcs, state);

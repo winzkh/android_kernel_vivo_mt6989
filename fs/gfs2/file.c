@@ -783,13 +783,9 @@ static inline bool should_fault_in_pages(struct iov_iter *i,
 	if (!user_backed_iter(i))
 		return false;
 
-	/*
-	 * Try to fault in multiple pages initially.  When that doesn't result
-	 * in any progress, fall back to a single page.
-	 */
 	size = PAGE_SIZE;
 	offs = offset_in_page(iocb->ki_pos);
-	if (*prev_count != count) {
+	if (*prev_count != count || !*window_size) {
 		size_t nr_dirtied;
 
 		nr_dirtied = max(current->nr_dirtied_pause -
@@ -873,7 +869,6 @@ static ssize_t gfs2_file_direct_write(struct kiocb *iocb, struct iov_iter *from,
 	struct gfs2_inode *ip = GFS2_I(inode);
 	size_t prev_count = 0, window_size = 0;
 	size_t written = 0;
-	bool enough_retries;
 	ssize_t ret;
 
 	/*
@@ -917,17 +912,11 @@ retry:
 	if (ret > 0)
 		written = ret;
 
-	enough_retries = prev_count == iov_iter_count(from) &&
-			 window_size <= PAGE_SIZE;
 	if (should_fault_in_pages(from, iocb, &prev_count, &window_size)) {
 		gfs2_glock_dq(gh);
 		window_size -= fault_in_iov_iter_readable(from, window_size);
-		if (window_size) {
-			if (!enough_retries)
-				goto retry;
-			/* fall back to buffered I/O */
-			ret = 0;
-		}
+		if (window_size)
+			goto retry;
 	}
 out_unlock:
 	if (gfs2_holder_queued(gh))
@@ -1029,8 +1018,8 @@ static ssize_t gfs2_file_buffered_write(struct kiocb *iocb,
 	}
 
 	gfs2_holder_init(ip->i_gl, LM_ST_EXCLUSIVE, 0, gh);
-	if (should_fault_in_pages(from, iocb, &prev_count, &window_size)) {
 retry:
+	if (should_fault_in_pages(from, iocb, &prev_count, &window_size)) {
 		window_size -= fault_in_iov_iter_readable(from, window_size);
 		if (!window_size) {
 			ret = -EFAULT;

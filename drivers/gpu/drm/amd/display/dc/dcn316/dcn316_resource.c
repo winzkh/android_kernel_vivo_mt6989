@@ -906,10 +906,6 @@ static const struct dc_debug_options debug_defaults_diags = {
 };
 
 static const struct dc_panel_config panel_config_defaults = {
-	.psr = {
-		.disable_psr = false,
-		.disallow_psrsu = false,
-	},
 	.ilr = {
 		.optimize_edp_link_rate = true,
 	},

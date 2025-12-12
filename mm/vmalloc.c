@@ -2920,10 +2920,6 @@ void *vmap_pfn(unsigned long *pfns, unsigned int count, pgprot_t prot)
 		free_vm_area(area);
 		return NULL;
 	}
-
-	flush_cache_vmap((unsigned long)area->addr,
-			 (unsigned long)area->addr + count * PAGE_SIZE);
-
 	return area->addr;
 }
 EXPORT_SYMBOL_GPL(vmap_pfn);
@@ -3036,7 +3032,7 @@ static void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 	int ret;
 
 	array_size = (unsigned long)nr_small_pages * sizeof(struct page *);
-	gfp_mask |= __GFP_NOWARN;
+	//gfp_mask |= __GFP_NOWARN;
 	if (!(gfp_mask & (GFP_DMA | GFP_DMA32)))
 		gfp_mask |= __GFP_HIGHMEM;
 
@@ -4052,32 +4048,14 @@ void pcpu_free_vm_areas(struct vm_struct **vms, int nr_vms)
 #ifdef CONFIG_PRINTK
 bool vmalloc_dump_obj(void *object)
 {
-	void *objp = (void *)PAGE_ALIGN((unsigned long)object);
-	const void *caller;
 	struct vm_struct *vm;
-	struct vmap_area *va;
-	unsigned long addr;
-	unsigned int nr_pages;
+	void *objp = (void *)PAGE_ALIGN((unsigned long)object);
 
-	if (!spin_trylock(&vmap_area_lock))
+	vm = find_vm_area(objp);
+	if (!vm)
 		return false;
-	va = __find_vmap_area((unsigned long)objp, &vmap_area_root);
-	if (!va) {
-		spin_unlock(&vmap_area_lock);
-		return false;
-	}
-
-	vm = va->vm;
-	if (!vm) {
-		spin_unlock(&vmap_area_lock);
-		return false;
-	}
-	addr = (unsigned long)vm->addr;
-	caller = vm->caller;
-	nr_pages = vm->nr_pages;
-	spin_unlock(&vmap_area_lock);
 	pr_cont(" %u-page vmalloc region starting at %#lx allocated at %pS\n",
-		nr_pages, addr, caller);
+		vm->nr_pages, (unsigned long)vm->addr, vm->caller);
 	return true;
 }
 #endif

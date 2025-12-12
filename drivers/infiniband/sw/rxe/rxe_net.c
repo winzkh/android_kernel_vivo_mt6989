@@ -156,9 +156,6 @@ static int rxe_udp_encap_recv(struct sock *sk, struct sk_buff *skb)
 	pkt->mask = RXE_GRH_MASK;
 	pkt->paylen = be16_to_cpu(udph->len) - sizeof(*udph);
 
-	/* remove udp header */
-	skb_pull(skb, sizeof(struct udphdr));
-
 	rxe_rcv(skb);
 
 	return 0;
@@ -348,7 +345,7 @@ static void rxe_skb_tx_dtor(struct sk_buff *skb)
 
 	if (unlikely(qp->need_req_skb &&
 		     skb_out < RXE_INFLIGHT_SKBS_PER_QP_LOW))
-		rxe_sched_task(&qp->req.task);
+		rxe_run_task(&qp->req.task, 1);
 
 	rxe_put(qp);
 }
@@ -400,9 +397,6 @@ static int rxe_loopback(struct sk_buff *skb, struct rxe_pkt_info *pkt)
 		return -EIO;
 	}
 
-	/* remove udp header */
-	skb_pull(skb, sizeof(struct udphdr));
-
 	rxe_rcv(skb);
 
 	return 0;
@@ -435,7 +429,7 @@ int rxe_xmit_packet(struct rxe_qp *qp, struct rxe_pkt_info *pkt,
 	if ((qp_type(qp) != IB_QPT_RC) &&
 	    (pkt->mask & RXE_END_MASK)) {
 		pkt->wqe->state = wqe_state_done;
-		rxe_sched_task(&qp->comp.task);
+		rxe_run_task(&qp->comp.task, 1);
 	}
 
 	rxe_counter_inc(rxe, RXE_CNT_SENT_PKTS);

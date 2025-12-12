@@ -45,7 +45,6 @@
 #include <linux/posix-timers.h>
 #include <linux/cgroup.h>
 #include <linux/audit.h>
-#include <linux/oom.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/signal.h>
@@ -59,7 +58,6 @@
 
 #undef CREATE_TRACE_POINTS
 #include <trace/hooks/signal.h>
-#include <trace/hooks/dtask.h>
 /*
  * SLAB caches for signal bits.
  */
@@ -565,10 +563,6 @@ bool unhandled_signal(struct task_struct *tsk, int sig)
 	if (handler != SIG_IGN && handler != SIG_DFL)
 		return false;
 
-	/* If dying, we handle all new signals by ignoring them */
-	if (fatal_signal_pending(tsk))
-		return false;
-
 	/* if ptraced, let the tracer determine */
 	return !tsk->ptrace;
 }
@@ -919,7 +913,12 @@ static bool prepare_signal(int sig, struct task_struct *p, bool force)
 
 	if (signal->flags & SIGNAL_GROUP_EXIT) {
 		if (signal->core_state)
+#if IS_ENABLED(CONFIG_MTK_AVOID_TRUNCATE_COREDUMP)
+			pr_info("[%d:%s] skip sig %d due to coredump\n",
+					p->pid, p->comm, sig);
+#else
 			return sig == SIGKILL;
+#endif
 		/*
 		 * The process is in the middle of dying, drop the signal.
 		 */
@@ -1007,7 +1006,6 @@ static void complete_signal(int sig, struct task_struct *p, enum pid_type type)
 {
 	struct signal_struct *signal = p->signal;
 	struct task_struct *t;
-	bool wake;
 
 	/*
 	 * Now find a thread we can wake up to take the signal off the queue.
@@ -1067,10 +1065,7 @@ static void complete_signal(int sig, struct task_struct *p, enum pid_type type)
 				trace_android_vh_exit_signal(t);
 				task_clear_jobctl_pending(t, JOBCTL_PENDING_MASK);
 				sigaddset(&t->pending.signal, SIGKILL);
-				wake = true;
-				trace_android_vh_exit_signal_whether_wake(t, &wake);
-				if (wake)
-					signal_wake_up(t, 1);
+				signal_wake_up(t, 1);
 			} while_each_thread(p, t);
 			return;
 		}
@@ -1312,7 +1307,6 @@ int do_send_sig_info(int sig, struct kernel_siginfo *info, struct task_struct *p
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(do_send_sig_info);
 
 enum sig_handler {
 	HANDLER_CURRENT, /* If reachable use the current handler */
@@ -1454,16 +1448,8 @@ int group_send_sig_info(int sig, struct kernel_siginfo *info,
 	ret = check_kill_permission(sig, info, p);
 	rcu_read_unlock();
 
-	if (!ret && sig) {
+	if (!ret && sig)
 		ret = do_send_sig_info(sig, info, p, type);
-		if (!ret && sig == SIGKILL) {
-			bool reap = false;
-
-			trace_android_vh_killed_process(current, p, &reap);
-			if (reap)
-				add_to_oom_reaper(p);
-		}
-	}
 
 	return ret;
 }
@@ -4701,6 +4687,9 @@ __weak const char *arch_vma_name(struct vm_area_struct *vma)
 {
 	return NULL;
 }
+#if IS_ENABLED(CONFIG_MTK_MBRAINK_EXPORT_DEPENDED)
+EXPORT_SYMBOL(arch_vma_name);
+#endif
 
 static inline void siginfo_buildtime_checks(void)
 {

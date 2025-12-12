@@ -69,10 +69,6 @@ BOOTAFLAGS	:= -D__ASSEMBLY__ $(BOOTCFLAGS) -nostdinc
 
 BOOTARFLAGS	:= -crD
 
-BOOTCFLAGS	+= $(call cc-option,-mno-prefixed) \
-		   $(call cc-option,-mno-pcrel) \
-		   $(call cc-option,-mno-mma)
-
 ifdef CONFIG_CC_IS_CLANG
 BOOTCFLAGS += $(CLANG_FLAGS)
 BOOTAFLAGS += $(CLANG_FLAGS)

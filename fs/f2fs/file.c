@@ -42,7 +42,7 @@ static vm_fault_t f2fs_filemap_fault(struct vm_fault *vmf)
 	vm_fault_t ret;
 
 	ret = filemap_fault(vmf);
-	if (ret & VM_FAULT_LOCKED)
+	if (!ret)
 		f2fs_update_iostat(F2FS_I_SB(inode), inode,
 					APP_MAPPED_READ_IO, F2FS_BLKSIZE);
 
@@ -528,11 +528,7 @@ static int f2fs_file_mmap(struct file *file, struct vm_area_struct *vma)
 
 	file_accessed(file);
 	vma->vm_ops = &f2fs_file_vm_ops;
-
-	f2fs_down_read(&F2FS_I(inode)->i_sem);
 	set_inode_flag(inode, FI_MMAP_FILE);
-	f2fs_up_read(&F2FS_I(inode)->i_sem);
-
 	return 0;
 }
 
@@ -558,14 +554,20 @@ static int f2fs_file_open(struct inode *inode, struct file *filp)
 void f2fs_truncate_data_blocks_range(struct dnode_of_data *dn, int count)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(dn->inode);
+	struct f2fs_node *raw_node;
 	int nr_free = 0, ofs = dn->ofs_in_node, len = count;
 	__le32 *addr;
+	int base = 0;
 	bool compressed_cluster = false;
 	int cluster_index = 0, valid_blocks = 0;
 	int cluster_size = F2FS_I(dn->inode)->i_cluster_size;
 	bool released = !atomic_read(&F2FS_I(dn->inode)->i_compr_blocks);
 
-	addr = get_dnode_addr(dn->inode, dn->node_page) + ofs;
+	if (IS_INODE(dn->node_page) && f2fs_has_extra_attr(dn->inode))
+		base = get_extra_isize(dn->inode);
+
+	raw_node = F2FS_NODE(dn->node_page);
+	addr = blkaddr_in_node(raw_node) + base + ofs;
 
 	/* Assumption: truncation starts with cluster */
 	for (; count > 0; count--, addr++, dn->ofs_in_node++, cluster_index++) {
@@ -583,19 +585,19 @@ void f2fs_truncate_data_blocks_range(struct dnode_of_data *dn, int count)
 		if (blkaddr == NULL_ADDR)
 			continue;
 
-		f2fs_set_data_blkaddr(dn, NULL_ADDR);
+		dn->data_blkaddr = NULL_ADDR;
+		f2fs_set_data_blkaddr(dn);
 
 		if (__is_valid_data_blkaddr(blkaddr)) {
-			if (time_to_inject(sbi, FAULT_BLKADDR_CONSISTENCE))
+			if (!f2fs_is_valid_blkaddr(sbi, blkaddr,
+					DATA_GENERIC_ENHANCE))
 				continue;
-			if (!f2fs_is_valid_blkaddr_raw(sbi, blkaddr,
-						DATA_GENERIC_ENHANCE)) {
-				f2fs_handle_error(sbi, ERROR_INVALID_BLKADDR);
-				continue;
-			}
 			if (compressed_cluster)
 				valid_blocks++;
 		}
+
+		if (dn->ofs_in_node == 0 && IS_INODE(dn->node_page))
+			clear_inode_flag(dn->inode, FI_FIRST_BLOCK_WRITTEN);
 
 		f2fs_invalidate_blocks(sbi, blkaddr);
 
@@ -1487,7 +1489,8 @@ static int f2fs_do_zero_range(struct dnode_of_data *dn, pgoff_t start,
 		}
 
 		f2fs_invalidate_blocks(sbi, dn->data_blkaddr);
-		f2fs_set_data_blkaddr(dn, NEW_ADDR);
+		dn->data_blkaddr = NEW_ADDR;
+		f2fs_set_data_blkaddr(dn);
 	}
 
 	f2fs_update_read_extent_cache_range(dn, start, 0, index - start);
@@ -1922,19 +1925,12 @@ static int f2fs_setflags_common(struct inode *inode, u32 iflags, u32 mask)
 			int err = f2fs_convert_inline_inode(inode);
 			if (err)
 				return err;
-
-			f2fs_down_write(&F2FS_I(inode)->i_sem);
-			if (!f2fs_may_compress(inode) ||
-					(S_ISREG(inode->i_mode) &&
-					F2FS_HAS_BLOCKS(inode))) {
-				f2fs_up_write(&F2FS_I(inode)->i_sem);
+			if (!f2fs_may_compress(inode))
 				return -EINVAL;
-			}
-			err = set_compress_context(inode);
-			f2fs_up_write(&F2FS_I(inode)->i_sem);
-
-			if (err)
-				return err;
+			if (S_ISREG(inode->i_mode) && F2FS_HAS_BLOCKS(inode))
+				return -EINVAL;
+			if (set_compress_context(inode))
+				return -EOPNOTSUPP;
 		}
 	}
 
@@ -2597,11 +2593,6 @@ static int f2fs_defragment_range(struct f2fs_sb_info *sbi,
 
 	inode_lock(inode);
 
-	if (is_inode_flag_set(inode, FI_COMPRESS_RELEASED)) {
-		err = -EINVAL;
-		goto unlock_out;
-	}
-
 	/* if in-place-update policy is enabled, don't waste time here */
 	set_inode_flag(inode, FI_OPU_WRITE);
 	if (f2fs_should_update_inplace(inode, NULL)) {
@@ -2726,7 +2717,6 @@ clear_out:
 	clear_inode_flag(inode, FI_SKIP_WRITES);
 out:
 	clear_inode_flag(inode, FI_OPU_WRITE);
-unlock_out:
 	inode_unlock(inode);
 	if (!err)
 		range->len = (u64)total << PAGE_SHIFT;
@@ -2817,11 +2807,6 @@ static int f2fs_move_file_range(struct file *file_in, loff_t pos_in,
 		ret = -EBUSY;
 		if (!inode_trylock(dst))
 			goto out;
-	}
-
-	if (f2fs_compressed_file(src) || f2fs_compressed_file(dst)) {
-		ret = -EOPNOTSUPP;
-		goto out_unlock;
 	}
 
 	ret = -EINVAL;
@@ -3252,7 +3237,6 @@ int f2fs_precache_extents(struct inode *inode)
 		return -EOPNOTSUPP;
 
 	map.m_lblk = 0;
-	map.m_pblk = 0;
 	map.m_next_pgofs = NULL;
 	map.m_next_extent = &m_next_extent;
 	map.m_seg_type = NO_CHECK_TYPE;
@@ -3294,7 +3278,7 @@ static int f2fs_ioc_resize_fs(struct file *filp, unsigned long arg)
 			   sizeof(block_count)))
 		return -EFAULT;
 
-	return f2fs_resize_fs(filp, block_count);
+	return f2fs_resize_fs(sbi, block_count);
 }
 
 static int f2fs_ioc_enable_verity(struct file *filp, unsigned long arg)
@@ -3446,7 +3430,8 @@ static int release_compress_blocks(struct dnode_of_data *dn, pgoff_t count)
 			if (blkaddr != NEW_ADDR)
 				continue;
 
-			f2fs_set_data_blkaddr(dn, NULL_ADDR);
+			dn->data_blkaddr = NULL_ADDR;
+			f2fs_set_data_blkaddr(dn);
 		}
 
 		f2fs_i_compr_blocks_update(dn->inode, compr_blocks, false);
@@ -3470,7 +3455,7 @@ static int f2fs_release_compress_blocks(struct file *filp, unsigned long arg)
 	int ret;
 	int writecount;
 
-	if (!f2fs_sb_has_compression(sbi))
+	if (!f2fs_sb_has_compression(F2FS_I_SB(inode)))
 		return -EOPNOTSUPP;
 
 	if (!f2fs_compressed_file(inode))
@@ -3483,7 +3468,7 @@ static int f2fs_release_compress_blocks(struct file *filp, unsigned long arg)
 	if (ret)
 		return ret;
 
-	f2fs_balance_fs(sbi, true);
+	f2fs_balance_fs(F2FS_I_SB(inode), true);
 
 	inode_lock(inode);
 
@@ -3569,10 +3554,10 @@ out:
 	return ret;
 }
 
-static int reserve_compress_blocks(struct dnode_of_data *dn, pgoff_t count,
-		unsigned int *reserved_blocks)
+static int reserve_compress_blocks(struct dnode_of_data *dn, pgoff_t count)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(dn->inode);
+	unsigned int reserved_blocks = 0;
 	int cluster_size = F2FS_I(dn->inode)->i_cluster_size;
 	block_t blkaddr;
 	int i;
@@ -3592,63 +3577,44 @@ static int reserve_compress_blocks(struct dnode_of_data *dn, pgoff_t count,
 
 	while (count) {
 		int compr_blocks = 0;
-		blkcnt_t reserved = 0;
-		blkcnt_t to_reserved;
+		blkcnt_t reserved;
 		int ret;
 
-		for (i = 0; i < cluster_size; i++) {
-			blkaddr = data_blkaddr(dn->inode, dn->node_page,
-						dn->ofs_in_node + i);
+		for (i = 0; i < cluster_size; i++, dn->ofs_in_node++) {
+			blkaddr = f2fs_data_blkaddr(dn);
 
 			if (i == 0) {
-				if (blkaddr != COMPRESS_ADDR) {
-					dn->ofs_in_node += cluster_size;
-					goto next;
-				}
-				continue;
+				if (blkaddr == COMPRESS_ADDR)
+					continue;
+				dn->ofs_in_node += cluster_size;
+				goto next;
 			}
 
-			/*
-			 * compressed cluster was not released due to it
-			 * fails in release_compress_blocks(), so NEW_ADDR
-			 * is a possible case.
-			 */
-			if (blkaddr == NEW_ADDR) {
-				reserved++;
-				continue;
-			}
 			if (__is_valid_data_blkaddr(blkaddr)) {
 				compr_blocks++;
 				continue;
 			}
+
+			dn->data_blkaddr = NEW_ADDR;
+			f2fs_set_data_blkaddr(dn);
 		}
 
-		to_reserved = cluster_size - compr_blocks - reserved;
-
-		/* for the case all blocks in cluster were reserved */
-		if (to_reserved == 1) {
-			dn->ofs_in_node += cluster_size;
-			goto next;
-		}
-
-		ret = inc_valid_block_count(sbi, dn->inode,
-						&to_reserved, false);
-		if (unlikely(ret))
+		reserved = cluster_size - compr_blocks;
+		ret = inc_valid_block_count(sbi, dn->inode, &reserved);
+		if (ret)
 			return ret;
 
-		for (i = 0; i < cluster_size; i++, dn->ofs_in_node++) {
-			if (f2fs_data_blkaddr(dn) == NULL_ADDR)
-				f2fs_set_data_blkaddr(dn, NEW_ADDR);
-		}
+		if (reserved != cluster_size - compr_blocks)
+			return -ENOSPC;
 
 		f2fs_i_compr_blocks_update(dn->inode, compr_blocks, true);
 
-		*reserved_blocks += to_reserved;
+		reserved_blocks += reserved;
 next:
 		count -= cluster_size;
 	}
 
-	return 0;
+	return reserved_blocks;
 }
 
 static int f2fs_reserve_compress_blocks(struct file *filp, unsigned long arg)
@@ -3659,7 +3625,7 @@ static int f2fs_reserve_compress_blocks(struct file *filp, unsigned long arg)
 	unsigned int reserved_blocks = 0;
 	int ret;
 
-	if (!f2fs_sb_has_compression(sbi))
+	if (!f2fs_sb_has_compression(F2FS_I_SB(inode)))
 		return -EOPNOTSUPP;
 
 	if (!f2fs_compressed_file(inode))
@@ -3672,7 +3638,10 @@ static int f2fs_reserve_compress_blocks(struct file *filp, unsigned long arg)
 	if (ret)
 		return ret;
 
-	f2fs_balance_fs(sbi, true);
+	if (atomic_read(&F2FS_I(inode)->i_compr_blocks))
+		goto out;
+
+	f2fs_balance_fs(F2FS_I_SB(inode), true);
 
 	inode_lock(inode);
 
@@ -3680,9 +3649,6 @@ static int f2fs_reserve_compress_blocks(struct file *filp, unsigned long arg)
 		ret = -EINVAL;
 		goto unlock_inode;
 	}
-
-	if (atomic_read(&F2FS_I(inode)->i_compr_blocks))
-		goto unlock_inode;
 
 	f2fs_down_write(&F2FS_I(inode)->i_gc_rwsem[WRITE]);
 	filemap_invalidate_lock(inode->i_mapping);
@@ -3709,7 +3675,7 @@ static int f2fs_reserve_compress_blocks(struct file *filp, unsigned long arg)
 		count = min(end_offset - dn.ofs_in_node, last_idx - page_idx);
 		count = round_up(count, F2FS_I(inode)->i_cluster_size);
 
-		ret = reserve_compress_blocks(&dn, count, &reserved_blocks);
+		ret = reserve_compress_blocks(&dn, count);
 
 		f2fs_put_dnode(&dn);
 
@@ -3717,21 +3683,23 @@ static int f2fs_reserve_compress_blocks(struct file *filp, unsigned long arg)
 			break;
 
 		page_idx += count;
+		reserved_blocks += ret;
 	}
 
 	filemap_invalidate_unlock(inode->i_mapping);
 	f2fs_up_write(&F2FS_I(inode)->i_gc_rwsem[WRITE]);
 
-	if (!ret) {
+	if (ret >= 0) {
 		clear_inode_flag(inode, FI_COMPRESS_RELEASED);
 		inode->i_ctime = current_time(inode);
 		f2fs_mark_inode_dirty_sync(inode, true);
 	}
 unlock_inode:
 	inode_unlock(inode);
+out:
 	mnt_drop_write_file(filp);
 
-	if (!ret) {
+	if (ret >= 0) {
 		ret = put_user(reserved_blocks, (u64 __user *)arg);
 	} else if (reserved_blocks &&
 			atomic_read(&F2FS_I(inode)->i_compr_blocks)) {
@@ -3980,19 +3948,14 @@ static int f2fs_ioc_set_compress_option(struct file *filp, unsigned long arg)
 				sizeof(option)))
 		return -EFAULT;
 
-	if (option.log_cluster_size < MIN_COMPRESS_LOG_SIZE ||
-		option.log_cluster_size > MAX_COMPRESS_LOG_SIZE ||
-		option.algorithm >= COMPRESS_MAX)
+	if (!f2fs_compressed_file(inode) ||
+			option.log_cluster_size < MIN_COMPRESS_LOG_SIZE ||
+			option.log_cluster_size > MAX_COMPRESS_LOG_SIZE ||
+			option.algorithm >= COMPRESS_MAX)
 		return -EINVAL;
 
 	file_start_write(filp);
 	inode_lock(inode);
-
-	f2fs_down_write(&F2FS_I(inode)->i_sem);
-	if (!f2fs_compressed_file(inode)) {
-		ret = -EINVAL;
-		goto out;
-	}
 
 	if (f2fs_is_mmap_file(inode) || get_dirty_pages(inode)) {
 		ret = -EBUSY;
@@ -4007,22 +3970,12 @@ static int f2fs_ioc_set_compress_option(struct file *filp, unsigned long arg)
 	F2FS_I(inode)->i_compress_algorithm = option.algorithm;
 	F2FS_I(inode)->i_log_cluster_size = option.log_cluster_size;
 	F2FS_I(inode)->i_cluster_size = BIT(option.log_cluster_size);
-	/* Set default level */
-	if (F2FS_I(inode)->i_compress_algorithm == COMPRESS_ZSTD)
-		F2FS_I(inode)->i_compress_level = F2FS_ZSTD_DEFAULT_CLEVEL;
-	else
-		F2FS_I(inode)->i_compress_level = 0;
-	/* Adjust mount option level */
-	if (option.algorithm == F2FS_OPTION(sbi).compress_algorithm &&
-	    F2FS_OPTION(sbi).compress_level)
-		F2FS_I(inode)->i_compress_level = F2FS_OPTION(sbi).compress_level;
 	f2fs_mark_inode_dirty_sync(inode, true);
 
 	if (!f2fs_is_compress_backend_ready(inode))
 		f2fs_warn(sbi, "compression algorithm is successfully set, "
 			"but current kernel doesn't support this algorithm.");
 out:
-	f2fs_up_write(&F2FS_I(inode)->i_sem);
 	inode_unlock(inode);
 	file_end_write(filp);
 
@@ -4082,7 +4035,7 @@ static int f2fs_ioc_decompress_file(struct file *filp)
 	if (!f2fs_compressed_file(inode))
 		return -EINVAL;
 
-	f2fs_balance_fs(sbi, true);
+	f2fs_balance_fs(F2FS_I_SB(inode), true);
 
 	file_start_write(filp);
 	inode_lock(inode);
@@ -4157,7 +4110,7 @@ static int f2fs_ioc_compress_file(struct file *filp)
 	if (!f2fs_compressed_file(inode))
 		return -EINVAL;
 
-	f2fs_balance_fs(sbi, true);
+	f2fs_balance_fs(F2FS_I_SB(inode), true);
 
 	file_start_write(filp);
 	inode_lock(inode);

@@ -455,10 +455,8 @@ void cpufreq_freq_transition_end(struct cpufreq_policy *policy,
 			    policy->cur,
 			    policy->cpuinfo.max_freq);
 
-	spin_lock(&policy->transition_lock);
 	policy->transition_ongoing = false;
 	policy->transition_task = NULL;
-	spin_unlock(&policy->transition_lock);
 
 	wake_up(&policy->transition_wait);
 }
@@ -1540,8 +1538,7 @@ static int cpufreq_online(unsigned int cpu)
 	if (cpufreq_driver->ready)
 		cpufreq_driver->ready(policy);
 
-	/* Register cpufreq cooling only for a new policy */
-	if (new_policy && cpufreq_thermal_control_enabled(cpufreq_driver)) {
+	if (cpufreq_thermal_control_enabled(cpufreq_driver)) {
 		policy->cdev = of_cpufreq_cooling_register(policy);
 		trace_android_vh_thermal_register(policy);
 	}
@@ -1627,6 +1624,12 @@ static void __cpufreq_offline(unsigned int cpu, struct cpufreq_policy *policy)
 	else
 		policy->last_policy = policy->policy;
 
+	if (cpufreq_thermal_control_enabled(cpufreq_driver)) {
+		cpufreq_cooling_unregister(policy->cdev);
+		trace_android_vh_thermal_unregister(policy);
+		policy->cdev = NULL;
+	}
+
 	if (has_target())
 		cpufreq_exit_governor(policy);
 
@@ -1687,16 +1690,6 @@ static void cpufreq_remove_dev(struct device *dev, struct subsys_interface *sif)
 		return;
 	}
 
-	/*
-	 * Unregister cpufreq cooling once all the CPUs of the policy are
-	 * removed.
-	 */
-	if (cpufreq_thermal_control_enabled(cpufreq_driver)) {
-		cpufreq_cooling_unregister(policy->cdev);
-		trace_android_vh_thermal_unregister(policy);
-		policy->cdev = NULL;
-	}
-
 	/* We did light-weight exit earlier, do full tear down now */
 	if (cpufreq_driver->offline)
 		cpufreq_driver->exit(policy);
@@ -1752,7 +1745,7 @@ static unsigned int cpufreq_verify_current_freq(struct cpufreq_policy *policy, b
 		 * MHz. In such cases it is better to avoid getting into
 		 * unnecessary frequency updates.
 		 */
-		if (abs(policy->cur - new_freq) < KHZ_PER_MHZ)
+		if (abs(policy->cur - new_freq) < HZ_PER_MHZ)
 			return policy->cur;
 
 		cpufreq_out_of_sync(policy, new_freq);
@@ -1988,7 +1981,6 @@ bool cpufreq_driver_test_flags(u16 flags)
 {
 	return !!(cpufreq_driver->flags & flags);
 }
-EXPORT_SYMBOL_GPL(cpufreq_driver_test_flags);
 
 /**
  * cpufreq_get_current_driver - Return the current driver's name.

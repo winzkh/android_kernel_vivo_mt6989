@@ -135,16 +135,6 @@ static acpi_status find_guid(const char *guid_string, struct wmi_block **out)
 	return AE_NOT_FOUND;
 }
 
-static bool guid_parse_and_compare(const char *string, const guid_t *guid)
-{
-	guid_t guid_input;
-
-	if (guid_parse(string, &guid_input))
-		return false;
-
-	return guid_equal(&guid_input, guid);
-}
-
 static const void *find_guid_context(struct wmi_block *wblock,
 				     struct wmi_driver *wdriver)
 {
@@ -155,7 +145,11 @@ static const void *find_guid_context(struct wmi_block *wblock,
 		return NULL;
 
 	while (*id->guid_string) {
-		if (guid_parse_and_compare(id->guid_string, &wblock->gblock.guid))
+		guid_t guid_input;
+
+		if (guid_parse(id->guid_string, &guid_input))
+			continue;
+		if (guid_equal(&wblock->gblock.guid, &guid_input))
 			return id->context;
 		id++;
 	}
@@ -839,7 +833,11 @@ static int wmi_dev_match(struct device *dev, struct device_driver *driver)
 		return 0;
 
 	while (*id->guid_string) {
-		if (guid_parse_and_compare(id->guid_string, &wblock->gblock.guid))
+		guid_t driver_guid;
+
+		if (WARN_ON(guid_parse(id->guid_string, &driver_guid)))
+			continue;
+		if (guid_equal(&driver_guid, &wblock->gblock.guid))
 			return 1;
 
 		id++;
@@ -849,13 +847,21 @@ static int wmi_dev_match(struct device *dev, struct device_driver *driver)
 }
 static int wmi_char_open(struct inode *inode, struct file *filp)
 {
-	/*
-	 * The miscdevice already stores a pointer to itself
-	 * inside filp->private_data
-	 */
-	struct wmi_block *wblock = container_of(filp->private_data, struct wmi_block, char_dev);
+	const char *driver_name = filp->f_path.dentry->d_iname;
+	struct wmi_block *wblock;
+	struct wmi_block *next;
 
-	filp->private_data = wblock;
+	list_for_each_entry_safe(wblock, next, &wmi_block_list, list) {
+		if (!wblock->dev.dev.driver)
+			continue;
+		if (strcmp(driver_name, wblock->dev.dev.driver->name) == 0) {
+			filp->private_data = wblock;
+			break;
+		}
+	}
+
+	if (!filp->private_data)
+		return -ENODEV;
 
 	return nonseekable_open(inode, filp);
 }
@@ -1204,8 +1210,8 @@ static int parse_wdg(struct device *wmi_bus_dev, struct acpi_device *device)
 	struct wmi_block *wblock, *next;
 	union acpi_object *obj;
 	acpi_status status;
+	int retval = 0;
 	u32 i, total;
-	int retval;
 
 	status = acpi_evaluate_object(device->handle, "_WDG", NULL, &out);
 	if (ACPI_FAILURE(status))
@@ -1216,8 +1222,8 @@ static int parse_wdg(struct device *wmi_bus_dev, struct acpi_device *device)
 		return -ENXIO;
 
 	if (obj->type != ACPI_TYPE_BUFFER) {
-		kfree(obj);
-		return -ENXIO;
+		retval = -ENXIO;
+		goto out_free_pointer;
 	}
 
 	gblock = (const struct guid_block *)obj->buffer.pointer;
@@ -1227,18 +1233,13 @@ static int parse_wdg(struct device *wmi_bus_dev, struct acpi_device *device)
 		if (debug_dump_wdg)
 			wmi_dump_wdg(&gblock[i]);
 
-		if (!gblock[i].instance_count) {
-			dev_info(wmi_bus_dev, FW_INFO "%pUL has zero instances\n", &gblock[i].guid);
-			continue;
-		}
-
 		if (guid_already_parsed_for_legacy(device, &gblock[i].guid))
 			continue;
 
 		wblock = kzalloc(sizeof(*wblock), GFP_KERNEL);
 		if (!wblock) {
-			dev_err(wmi_bus_dev, "Failed to allocate %pUL\n", &gblock[i].guid);
-			continue;
+			retval = -ENOMEM;
+			break;
 		}
 
 		wblock->acpi_device = device;
@@ -1277,9 +1278,9 @@ static int parse_wdg(struct device *wmi_bus_dev, struct acpi_device *device)
 		}
 	}
 
-	kfree(obj);
-
-	return 0;
+out_free_pointer:
+	kfree(out.pointer);
+	return retval;
 }
 
 /*

@@ -9,7 +9,6 @@
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/pagemap.h>
-#include <linux/pgsize_migration.h>
 #include <linux/mempolicy.h>
 #include <linux/rmap.h>
 #include <linux/swap.h>
@@ -349,14 +348,7 @@ done:
 
 static int show_map(struct seq_file *m, void *v)
 {
-	struct vm_area_struct *pad_vma = get_pad_vma(v);
-	struct vm_area_struct *vma = get_data_vma(v);
-
-	if (vma_pages(vma))
-		show_map_vma(m, vma);
-
-	show_map_pad_vma(vma, pad_vma, m, show_map_vma, false);
-
+	show_map_vma(m, v);
 	return 0;
 }
 
@@ -766,14 +758,12 @@ static int smaps_hugetlb_range(pte_t *pte, unsigned long hmask,
 static const struct mm_walk_ops smaps_walk_ops = {
 	.pmd_entry		= smaps_pte_range,
 	.hugetlb_entry		= smaps_hugetlb_range,
-	.walk_lock		= PGWALK_RDLOCK,
 };
 
 static const struct mm_walk_ops smaps_shmem_walk_ops = {
 	.pmd_entry		= smaps_pte_range,
 	.hugetlb_entry		= smaps_hugetlb_range,
 	.pte_hole		= smaps_pte_hole,
-	.walk_lock		= PGWALK_RDLOCK,
 };
 
 /*
@@ -782,8 +772,13 @@ static const struct mm_walk_ops smaps_shmem_walk_ops = {
  *
  * Use vm_start of @vma as the beginning address if @start is 0.
  */
+#if IS_ENABLED(CONFIG_MTK_MBRAINK_EXPORT_DEPENDED)
+void smap_gather_stats(struct vm_area_struct *vma,
+		struct mem_size_stats *mss, unsigned long start)
+#else
 static void smap_gather_stats(struct vm_area_struct *vma,
 		struct mem_size_stats *mss, unsigned long start)
+#endif
 {
 	const struct mm_walk_ops *ops = &smaps_walk_ops;
 
@@ -819,6 +814,9 @@ static void smap_gather_stats(struct vm_area_struct *vma,
 	else
 		walk_page_range(vma->vm_mm, start, vma->vm_end, ops, mss);
 }
+#if IS_ENABLED(CONFIG_MTK_MBRAINK_EXPORT_DEPENDED)
+EXPORT_SYMBOL(smap_gather_stats);
+#endif
 
 #define SEQ_PUT_DEC(str, val) \
 		seq_put_decimal_ull_width(m, str, (val) >> 10, 8)
@@ -866,14 +864,10 @@ static void __show_smap(struct seq_file *m, const struct mem_size_stats *mss,
 
 static int show_smap(struct seq_file *m, void *v)
 {
-	struct vm_area_struct *pad_vma = get_pad_vma(v);
-	struct vm_area_struct *vma = get_data_vma(v);
+	struct vm_area_struct *vma = v;
 	struct mem_size_stats mss;
 
 	memset(&mss, 0, sizeof(mss));
-
-	if (!vma_pages(vma))
-		goto show_pad;
 
 	smap_gather_stats(vma, &mss, 0);
 
@@ -892,9 +886,6 @@ static int show_smap(struct seq_file *m, void *v)
 	if (arch_pkeys_enabled())
 		seq_printf(m, "ProtectionKey:  %8u\n", vma_pkey(vma));
 	show_smap_vma_flags(m, vma);
-
-show_pad:
-	show_map_pad_vma(vma, pad_vma, m, show_smap, true);
 
 	return 0;
 }
@@ -1264,7 +1255,6 @@ static int clear_refs_test_walk(unsigned long start, unsigned long end,
 static const struct mm_walk_ops clear_refs_walk_ops = {
 	.pmd_entry		= clear_refs_pte_range,
 	.test_walk		= clear_refs_test_walk,
-	.walk_lock		= PGWALK_WRLOCK,
 };
 
 static ssize_t clear_refs_write(struct file *file, const char __user *buf,
@@ -1641,7 +1631,6 @@ static const struct mm_walk_ops pagemap_ops = {
 	.pmd_entry	= pagemap_pmd_range,
 	.pte_hole	= pagemap_pte_hole,
 	.hugetlb_entry	= pagemap_hugetlb_range,
-	.walk_lock	= PGWALK_RDLOCK,
 };
 
 /*
@@ -1948,7 +1937,6 @@ static int gather_hugetlb_stats(pte_t *pte, unsigned long hmask,
 static const struct mm_walk_ops show_numa_ops = {
 	.hugetlb_entry = gather_hugetlb_stats,
 	.pmd_entry = gather_pte_stats,
-	.walk_lock = PGWALK_RDLOCK,
 };
 
 /*

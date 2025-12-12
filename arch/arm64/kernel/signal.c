@@ -20,8 +20,6 @@
 #include <linux/ratelimit.h>
 #include <linux/syscalls.h>
 
-#include <trace/hooks/dtask.h>
-
 #include <asm/daifflags.h>
 #include <asm/debug-monitors.h>
 #include <asm/elf.h>
@@ -432,7 +430,7 @@ static int restore_za_context(struct user_ctxs *user)
 	fpsimd_flush_task_state(current);
 	/* From now, fpsimd_thread_switch() won't touch thread.sve_state */
 
-	sme_alloc(current, true);
+	sme_alloc(current);
 	if (!current->thread.za_state) {
 		current->thread.svcr &= ~SVCR_ZA_MASK;
 		clear_thread_flag(TIF_SME);
@@ -1109,11 +1107,8 @@ static void do_signal(struct pt_regs *regs)
 
 void do_notify_resume(struct pt_regs *regs, unsigned long thread_flags)
 {
-	int thread_lazy_flag = 0;
-
 	do {
-		trace_android_vh_read_lazy_flag(&thread_lazy_flag, &thread_flags);
-		if ((thread_flags & _TIF_NEED_RESCHED) || thread_lazy_flag) {
+		if (thread_flags & _TIF_NEED_RESCHED) {
 			/* Unmask Debug and SError for the next task */
 			local_daif_restore(DAIF_PROCCTX_NOIRQ);
 

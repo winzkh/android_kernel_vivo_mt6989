@@ -11,7 +11,6 @@
 #include <linux/syscalls.h>
 #include <linux/mempolicy.h>
 #include <linux/page-isolation.h>
-#include <linux/pgsize_migration.h>
 #include <linux/page_idle.h>
 #include <linux/userfaultfd_k.h>
 #include <linux/hugetlb.h>
@@ -42,7 +41,6 @@
 struct madvise_walk_private {
 	struct mmu_gather *tlb;
 	bool pageout;
-	void *private;
 };
 
 /*
@@ -182,8 +180,9 @@ static int madvise_update_vma(struct vm_area_struct *vma,
 	}
 
 success:
-	/* vm_flags is protected by the mmap_lock held in write mode. */
-	vma_start_write(vma);
+	/*
+	 * vm_flags is protected by the mmap_lock held in write mode.
+	 */
 	vm_flags_reset(vma, new_flags);
 	if (!vma->vm_file) {
 		error = replace_anon_vma_name(vma, anon_name);
@@ -224,7 +223,7 @@ static int swapin_walk_pmd_entry(pmd_t *pmd, unsigned long start,
 		trace_android_vh_madvise_swapin_walk_pmd_entry(entry);
 
 		page = read_swap_cache_async(entry, GFP_HIGHUSER_MOVABLE,
-					     vma, index, &splug);
+					     vma, index, false, &splug);
 		if (page)
 			put_page(page);
 	}
@@ -235,7 +234,6 @@ static int swapin_walk_pmd_entry(pmd_t *pmd, unsigned long start,
 
 static const struct mm_walk_ops swapin_walk_ops = {
 	.pmd_entry		= swapin_walk_pmd_entry,
-	.walk_lock		= PGWALK_RDLOCK,
 };
 
 static void force_shm_swapin_readahead(struct vm_area_struct *vma,
@@ -261,7 +259,7 @@ static void force_shm_swapin_readahead(struct vm_area_struct *vma,
 		rcu_read_unlock();
 
 		page = read_swap_cache_async(swap, GFP_HIGHUSER_MOVABLE,
-					     NULL, 0, &splug);
+					     NULL, 0, false, &splug);
 		if (page)
 			put_page(page);
 
@@ -413,7 +411,6 @@ static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
 			tlb_remove_pmd_tlb_entry(tlb, pmd, addr);
 		}
 
-		trace_android_vh_madvise_cold_or_pageout_page(pageout, page);
 		ClearPageReferenced(page);
 		test_and_clear_page_young(page);
 		if (pageout) {
@@ -428,7 +425,7 @@ static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
 huge_unlock:
 		spin_unlock(ptl);
 		if (pageout)
-			__reclaim_pages(&page_list, private->private);
+			reclaim_pages(&page_list);
 		return 0;
 	}
 
@@ -450,8 +447,7 @@ regular_page:
 
 		if (!pte_present(ptent)) {
 			entry = pte_to_swp_entry(ptent);
-			if (!is_migration_entry(entry))
-				trace_android_vh_madvise_pageout_swap_entry(entry,
+			trace_android_vh_madvise_pageout_swap_entry(entry,
 					swp_swapcount(entry));
 			continue;
 		}
@@ -521,7 +517,6 @@ regular_page:
 		 * As a side effect, it makes confuse idle-page tracking
 		 * because they will miss recent referenced history.
 		 */
-		trace_android_vh_madvise_cold_or_pageout_page(pageout, page);
 		ClearPageReferenced(page);
 		test_and_clear_page_young(page);
 		if (pageout) {
@@ -538,7 +533,7 @@ regular_page:
 	arch_leave_lazy_mmu_mode();
 	pte_unmap_unlock(orig_pte, ptl);
 	if (pageout)
-		__reclaim_pages(&page_list, private->private);
+		reclaim_pages(&page_list);
 	cond_resched();
 
 	return 0;
@@ -546,7 +541,6 @@ regular_page:
 
 static const struct mm_walk_ops cold_walk_ops = {
 	.pmd_entry = madvise_cold_or_pageout_pte_range,
-	.walk_lock = PGWALK_RDLOCK,
 };
 
 static void madvise_cold_page_range(struct mmu_gather *tlb,
@@ -595,17 +589,10 @@ static void madvise_pageout_page_range(struct mmu_gather *tlb,
 		.pageout = true,
 		.tlb = tlb,
 	};
-	LIST_HEAD(folio_list);
-
-	trace_android_rvh_madvise_pageout_begin(&walk_private.private);
 
 	tlb_start_vma(tlb, vma);
 	walk_page_range(vma->vm_mm, addr, end, &cold_walk_ops, &walk_private);
 	tlb_end_vma(tlb, vma);
-
-	trace_android_rvh_madvise_pageout_end(walk_private.private, &folio_list);
-	if (!list_empty(&folio_list))
-		reclaim_pages(&folio_list);
 }
 
 static long madvise_pageout(struct vm_area_struct *vma,
@@ -699,8 +686,8 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
 		 * deactivate all pages.
 		 */
 		if (folio_test_large(folio)) {
-			if (folio_estimated_sharers(folio) != 1)
-				break;
+			if (folio_mapcount(folio) != 1)
+				goto out;
 			folio_get(folio);
 			if (!folio_trylock(folio)) {
 				folio_put(folio);
@@ -776,7 +763,6 @@ next:
 
 static const struct mm_walk_ops madvise_free_walk_ops = {
 	.pmd_entry		= madvise_free_pte_range,
-	.walk_lock		= PGWALK_RDLOCK,
 };
 
 static int madvise_free_single_vma(struct vm_area_struct *vma,
@@ -836,8 +822,6 @@ static int madvise_free_single_vma(struct vm_area_struct *vma,
 static long madvise_dontneed_single_vma(struct vm_area_struct *vma,
 					unsigned long start, unsigned long end)
 {
-	madvise_vma_pad_pages(vma, start, end);
-
 	zap_page_range_single(vma, start, end - start, NULL);
 	return 0;
 }

@@ -25,6 +25,11 @@
 #include <linux/pid_namespace.h>
 #include <uapi/linux/magic.h>
 
+#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
+#define CREATE_TRACE_POINTS
+#include <trace/events/mtk_fuse.h>
+#endif
+
 MODULE_AUTHOR("Miklos Szeredi <miklos@szeredi.hu>");
 MODULE_DESCRIPTION("Filesystem in Userspace");
 MODULE_LICENSE("GPL");
@@ -68,24 +73,6 @@ struct fuse_forget_link *fuse_alloc_forget(void)
 	return kzalloc(sizeof(struct fuse_forget_link), GFP_KERNEL_ACCOUNT);
 }
 
-static struct fuse_submount_lookup *fuse_alloc_submount_lookup(void)
-{
-	struct fuse_submount_lookup *sl;
-
-	sl = kzalloc(sizeof(struct fuse_submount_lookup), GFP_KERNEL_ACCOUNT);
-	if (!sl)
-		return NULL;
-	sl->forget = fuse_alloc_forget();
-	if (!sl->forget)
-		goto out_free;
-
-	return sl;
-
-out_free:
-	kfree(sl);
-	return NULL;
-}
-
 static struct inode *fuse_alloc_inode(struct super_block *sb)
 {
 	struct fuse_inode *fi;
@@ -105,7 +92,6 @@ static struct inode *fuse_alloc_inode(struct super_block *sb)
 	fi->attr_version = 0;
 	fi->orig_ino = 0;
 	fi->state = 0;
-	fi->submount_lookup = NULL;
 	mutex_init(&fi->mutex);
 	spin_lock_init(&fi->lock);
 	fi->forget = fuse_alloc_forget();
@@ -140,17 +126,6 @@ static void fuse_free_inode(struct inode *inode)
 	kmem_cache_free(fuse_inode_cachep, fi);
 }
 
-static void fuse_cleanup_submount_lookup(struct fuse_conn *fc,
-					 struct fuse_submount_lookup *sl)
-{
-	if (!refcount_dec_and_test(&sl->count))
-		return;
-
-	fuse_queue_forget(fc, sl->forget, sl->nodeid, 1);
-	sl->forget = NULL;
-	kfree(sl);
-}
-
 static void fuse_evict_inode(struct inode *inode)
 {
 	struct fuse_inode *fi = get_fuse_inode(inode);
@@ -167,12 +142,10 @@ static void fuse_evict_inode(struct inode *inode)
 		if (fi->nlookup) {
 			fuse_queue_forget(fc, fi->forget, fi->nodeid,
 					  fi->nlookup);
+#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
+			trace_mtk_fuse_queue_forget(__func__, __LINE__, fi->nodeid, fi->nlookup);
+#endif
 			fi->forget = NULL;
-		}
-
-		if (fi->submount_lookup) {
-			fuse_cleanup_submount_lookup(fc, fi->submount_lookup);
-			fi->submount_lookup = NULL;
 		}
 	}
 	if (S_ISREG(inode->i_mode) && !fuse_is_bad(inode)) {
@@ -384,13 +357,6 @@ void fuse_change_attributes(struct inode *inode, struct fuse_attr *attr,
 		fuse_dax_dontcache(inode, attr->flags);
 }
 
-static void fuse_init_submount_lookup(struct fuse_submount_lookup *sl,
-				      u64 nodeid)
-{
-	sl->nodeid = nodeid;
-	refcount_set(&sl->count, 1);
-}
-
 static void fuse_init_inode(struct inode *inode, struct fuse_attr *attr)
 {
 	inode->i_mode = attr->mode & S_IFMT;
@@ -501,6 +467,10 @@ struct inode *fuse_iget_backing(struct super_block *sb, u64 nodeid,
 	fi = get_fuse_inode(inode);
 	fuse_init_inode(inode, &attr);
 	spin_lock(&fi->lock);
+#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
+	trace_mtk_fuse_nlookup(__func__, __LINE__, inode,
+			fi->nodeid, fi->nlookup, fi->nlookup + 1);
+#endif
 	fi->nlookup++;
 	spin_unlock(&fi->lock);
 
@@ -527,22 +497,12 @@ struct inode *fuse_iget(struct super_block *sb, u64 nodeid,
 	 */
 	if (fc->auto_submounts && (attr->flags & FUSE_ATTR_SUBMOUNT) &&
 	    S_ISDIR(attr->mode)) {
-		struct fuse_inode *fi;
-
 		inode = new_inode(sb);
 		if (!inode)
 			return NULL;
 
 		fuse_init_inode(inode, attr);
-		fi = get_fuse_inode(inode);
-		fi->nodeid = nodeid;
-		fi->submount_lookup = fuse_alloc_submount_lookup();
-		if (!fi->submount_lookup) {
-			iput(inode);
-			return NULL;
-		}
-		/* Sets nlookup = 1 on fi->submount_lookup->nlookup */
-		fuse_init_submount_lookup(fi->submount_lookup, nodeid);
+		get_fuse_inode(inode)->nodeid = nodeid;
 		inode->i_flags |= S_AUTOMOUNT;
 		goto done;
 	}
@@ -562,17 +522,18 @@ retry:
 	} else if (fuse_stale_inode(inode, generation, attr)) {
 		/* nodeid was reused, any I/O on the old inode should fail */
 		fuse_make_bad(inode);
-		if (inode != d_inode(sb->s_root)) {
-			remove_inode_hash(inode);
-			iput(inode);
-			goto retry;
-		}
+		iput(inode);
+		goto retry;
 	}
+done:
 	fi = get_fuse_inode(inode);
 	spin_lock(&fi->lock);
+#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
+	trace_mtk_fuse_nlookup(__func__, __LINE__, inode,
+			fi->nodeid, fi->nlookup, fi->nlookup + 1);
+#endif
 	fi->nlookup++;
 	spin_unlock(&fi->lock);
-done:
 	fuse_change_attributes(inode, attr, attr_valid, attr_version);
 
 	return inode;
@@ -1665,8 +1626,6 @@ static int fuse_fill_super_submount(struct super_block *sb,
 	struct super_block *parent_sb = parent_fi->inode.i_sb;
 	struct fuse_attr root_attr;
 	struct inode *root;
-	struct fuse_submount_lookup *sl;
-	struct fuse_inode *fi;
 
 	fuse_sb_defaults(sb);
 	fm->sb = sb;
@@ -1689,26 +1648,17 @@ static int fuse_fill_super_submount(struct super_block *sb,
 	 * its nlookup should not be incremented.  fuse_iget() does
 	 * that, though, so undo it here.
 	 */
-	fi = get_fuse_inode(root);
-	fi->nlookup--;
-
+#if IS_ENABLED(CONFIG_MTK_FUSE_DEBUG)
+	trace_mtk_fuse_nlookup(__func__, __LINE__, root,
+			get_fuse_inode(root)->nodeid,
+			get_fuse_inode(root)->nlookup,
+			get_fuse_inode(root)->nlookup - 1);
+#endif
+	get_fuse_inode(root)->nlookup--;
 	sb->s_d_op = &fuse_dentry_operations;
 	sb->s_root = d_make_root(root);
 	if (!sb->s_root)
 		return -ENOMEM;
-
-	/*
-	 * Grab the parent's submount_lookup pointer and take a
-	 * reference on the shared nlookup from the parent.  This is to
-	 * prevent the last forget for this nodeid from getting
-	 * triggered until all users have finished with it.
-	 */
-	sl = parent_fi->submount_lookup;
-	WARN_ON(!sl);
-	if (sl) {
-		refcount_inc(&sl->count);
-		fi->submount_lookup = sl;
-	}
 
 	return 0;
 }

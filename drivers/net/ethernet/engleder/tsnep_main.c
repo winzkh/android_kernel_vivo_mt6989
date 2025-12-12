@@ -65,11 +65,8 @@ static irqreturn_t tsnep_irq(int irq, void *arg)
 
 	/* handle TX/RX queue 0 interrupt */
 	if ((active & adapter->queue[0].irq_mask) != 0) {
-		if (napi_schedule_prep(&adapter->queue[0].napi)) {
-			tsnep_disable_irq(adapter, adapter->queue[0].irq_mask);
-			/* schedule after masking to avoid races */
-			__napi_schedule(&adapter->queue[0].napi);
-		}
+		tsnep_disable_irq(adapter, adapter->queue[0].irq_mask);
+		napi_schedule(&adapter->queue[0].napi);
 	}
 
 	return IRQ_HANDLED;
@@ -80,11 +77,8 @@ static irqreturn_t tsnep_irq_txrx(int irq, void *arg)
 	struct tsnep_queue *queue = arg;
 
 	/* handle TX/RX queue interrupt */
-	if (napi_schedule_prep(&queue->napi)) {
-		tsnep_disable_irq(queue->adapter, queue->irq_mask);
-		/* schedule after masking to avoid races */
-		__napi_schedule(&queue->napi);
-	}
+	tsnep_disable_irq(queue->adapter, queue->irq_mask);
+	napi_schedule(&queue->napi);
 
 	return IRQ_HANDLED;
 }
@@ -930,10 +924,6 @@ static int tsnep_poll(struct napi_struct *napi, int budget)
 	if (queue->tx)
 		complete = tsnep_tx_poll(queue->tx, budget);
 
-	/* handle case where we are called by netpoll with a budget of 0 */
-	if (unlikely(budget <= 0))
-		return budget;
-
 	if (queue->rx) {
 		done = tsnep_rx_poll(queue->rx, napi, budget);
 		if (done >= budget)
@@ -973,14 +963,14 @@ static int tsnep_request_irq(struct tsnep_queue *queue, bool first)
 		dev = queue->adapter;
 	} else {
 		if (queue->tx && queue->rx)
-			snprintf(queue->name, sizeof(queue->name), "%s-txrx-%d",
-				 name, queue->rx->queue_index);
+			sprintf(queue->name, "%s-txrx-%d", name,
+				queue->rx->queue_index);
 		else if (queue->tx)
-			snprintf(queue->name, sizeof(queue->name), "%s-tx-%d",
-				 name, queue->tx->queue_index);
+			sprintf(queue->name, "%s-tx-%d", name,
+				queue->tx->queue_index);
 		else
-			snprintf(queue->name, sizeof(queue->name), "%s-rx-%d",
-				 name, queue->rx->queue_index);
+			sprintf(queue->name, "%s-rx-%d", name,
+				queue->rx->queue_index);
 		handler = tsnep_irq_txrx;
 		dev = queue;
 	}

@@ -972,8 +972,10 @@ static void __init kvm_init_platform(void)
 		 * Ensure that _bss_decrypted section is marked as decrypted in the
 		 * shared pages list.
 		 */
+		nr_pages = DIV_ROUND_UP(__end_bss_decrypted - __start_bss_decrypted,
+					PAGE_SIZE);
 		early_set_mem_enc_dec_hypercall((unsigned long)__start_bss_decrypted,
-						__end_bss_decrypted - __start_bss_decrypted, 0);
+						nr_pages, 0);
 
 		/*
 		 * If not booted using EFI, enable Live migration support.

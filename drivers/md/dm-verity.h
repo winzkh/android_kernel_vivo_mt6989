@@ -11,7 +11,6 @@
 #ifndef DM_VERITY_H
 #define DM_VERITY_H
 
-#include <linux/dm-io.h>
 #include <linux/dm-bufio.h>
 #include <linux/device-mapper.h>
 #include <linux/interrupt.h>
@@ -69,9 +68,6 @@ struct dm_verity {
 	unsigned long *validated_blocks; /* bitset blocks validated */
 
 	char *signature_key_desc; /* signature keyring reference */
-
-	struct dm_io_client *io;
-	mempool_t recheck_pool;
 };
 
 struct dm_verity_io {
@@ -80,15 +76,14 @@ struct dm_verity_io {
 	/* original value of bio->bi_end_io */
 	bio_end_io_t *orig_bi_end_io;
 
-	struct bvec_iter iter;
-
 	sector_t block;
 	unsigned int n_blocks;
 	bool in_tasklet;
 
-	struct work_struct work;
+	struct bvec_iter iter;
 
-	char *recheck_buffer;
+	struct work_struct work;
+	struct tasklet_struct tasklet;
 
 	/*
 	 * Three variably-size fields follow this struct:
@@ -120,6 +115,12 @@ static inline u8 *verity_io_want_digest(struct dm_verity *v,
 	return (u8 *)(io + 1) + v->ahash_reqsize + v->digest_size;
 }
 
+static inline u8 *verity_io_digest_end(struct dm_verity *v,
+				       struct dm_verity_io *io)
+{
+	return verity_io_want_digest(v, io) + v->digest_size;
+}
+
 extern int verity_for_bv_block(struct dm_verity *v, struct dm_verity_io *io,
 			       struct bvec_iter *iter,
 			       int (*process)(struct dm_verity *v,
@@ -127,7 +128,7 @@ extern int verity_for_bv_block(struct dm_verity *v, struct dm_verity_io *io,
 					      u8 *data, size_t len));
 
 extern int verity_hash(struct dm_verity *v, struct ahash_request *req,
-		       const u8 *data, size_t len, u8 *digest, bool may_sleep);
+		       const u8 *data, size_t len, u8 *digest);
 
 extern int verity_hash_for_block(struct dm_verity *v, struct dm_verity_io *io,
 				 sector_t block, u8 *digest, bool *is_zero);

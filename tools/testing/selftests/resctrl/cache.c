@@ -89,19 +89,21 @@ static int reset_enable_llc_perf(pid_t pid, int cpu_no)
 static int get_llc_perf(unsigned long *llc_perf_miss)
 {
 	__u64 total_misses;
-	int ret;
 
 	/* Stop counters after one span to get miss rate */
 
 	ioctl(fd_lm, PERF_EVENT_IOC_DISABLE, 0);
 
-	ret = read(fd_lm, &rf_cqm, sizeof(struct read_format));
-	if (ret == -1) {
+	if (read(fd_lm, &rf_cqm, sizeof(struct read_format)) == -1) {
 		perror("Could not get llc misses through perf");
+
 		return -1;
 	}
 
 	total_misses = rf_cqm.values[0].value;
+
+	close(fd_lm);
+
 	*llc_perf_miss = total_misses;
 
 	return 0;
@@ -242,12 +244,10 @@ int cat_val(struct resctrl_val_param *param)
 	while (1) {
 		if (!strncmp(resctrl_val, CAT_STR, sizeof(CAT_STR))) {
 			ret = param->setup(1, param);
-			if (ret == END_OF_TESTS) {
+			if (ret) {
 				ret = 0;
 				break;
 			}
-			if (ret < 0)
-				break;
 			ret = reset_enable_llc_perf(bm_pid, param->cpu_no);
 			if (ret)
 				break;
@@ -256,24 +256,18 @@ int cat_val(struct resctrl_val_param *param)
 					 memflush, operation, resctrl_val)) {
 				fprintf(stderr, "Error-running fill buffer\n");
 				ret = -1;
-				goto pe_close;
+				break;
 			}
 
 			sleep(1);
 			ret = measure_cache_vals(param, bm_pid);
 			if (ret)
-				goto pe_close;
-
-			close(fd_lm);
+				break;
 		} else {
 			break;
 		}
 	}
 
-	return ret;
-
-pe_close:
-	close(fd_lm);
 	return ret;
 }
 

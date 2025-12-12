@@ -736,7 +736,7 @@ int rxrpc_do_sendmsg(struct rxrpc_sock *rx, struct msghdr *msg, size_t len)
 		fallthrough;
 	case 1:
 		if (p.call.timeouts.hard > 0) {
-			j = p.call.timeouts.hard * HZ;
+			j = msecs_to_jiffies(p.call.timeouts.hard);
 			now = jiffies;
 			j += now;
 			WRITE_ONCE(call->expect_term_by, j);

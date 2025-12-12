@@ -11,17 +11,16 @@
 struct z_erofs_decompress_req {
 	struct super_block *sb;
 	struct page **in, **out;
+
 	unsigned short pageofs_in, pageofs_out;
 	unsigned int inputsize, outputsize;
 
-	unsigned int alg;       /* the algorithm for decompression */
+	/* indicate the algorithm will be used for decompression */
+	unsigned int alg;
 	bool inplace_io, partial_decoding, fillgaps;
-	gfp_t gfp;      /* allocation flags for extra temporary buffers */
 };
 
 struct z_erofs_decompressor {
-	int (*config)(struct super_block *sb, struct erofs_super_block *dsb,
-		      void *data, int size);
 	int (*decompress)(struct z_erofs_decompress_req *rq,
 			  struct page **pagepool);
 	char *name;
@@ -90,11 +89,10 @@ static inline bool erofs_page_is_managed(const struct erofs_sb_info *sbi,
 
 int z_erofs_fixup_insize(struct z_erofs_decompress_req *rq, const char *padbuf,
 			 unsigned int padbufsize);
-extern const struct z_erofs_decompressor erofs_decompressors[];
+int z_erofs_decompress(struct z_erofs_decompress_req *rq,
+		       struct page **pagepool);
 
 /* prototypes for specific algorithms */
-int z_erofs_load_lzma_config(struct super_block *sb,
-			struct erofs_super_block *dsb, void *data, int size);
 int z_erofs_lzma_decompress(struct z_erofs_decompress_req *rq,
 			    struct page **pagepool);
 #endif

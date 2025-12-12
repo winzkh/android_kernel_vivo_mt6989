@@ -162,7 +162,7 @@ static int pch_pic_domain_translate(struct irq_domain *d,
 		if (fwspec->param_count < 2)
 			return -EINVAL;
 
-		*hwirq = fwspec->param[0];
+		*hwirq = fwspec->param[0] + priv->ht_vec_base;
 		*type = fwspec->param[1] & IRQ_TYPE_SENSE_MASK;
 	} else {
 		*hwirq = fwspec->param[0] - priv->gsi_base;
@@ -188,7 +188,7 @@ static int pch_pic_alloc(struct irq_domain *domain, unsigned int virq,
 
 	parent_fwspec.fwnode = domain->parent->fwnode;
 	parent_fwspec.param_count = 1;
-	parent_fwspec.param[0] = hwirq + priv->ht_vec_base;
+	parent_fwspec.param[0] = hwirq;
 
 	err = irq_domain_alloc_irqs_parent(domain, virq, 1, &parent_fwspec);
 	if (err)
@@ -328,8 +328,9 @@ int find_pch_pic(u32 gsi)
 	return -1;
 }
 
-static int __init pch_lpc_parse_madt(union acpi_subtable_headers *header,
-					const unsigned long end)
+static int __init
+pch_lpc_parse_madt(union acpi_subtable_headers *header,
+		       const unsigned long end)
 {
 	struct acpi_madt_lpc_pic *pchlpc_entry = (struct acpi_madt_lpc_pic *)header;
 
@@ -338,23 +339,18 @@ static int __init pch_lpc_parse_madt(union acpi_subtable_headers *header,
 
 static int __init acpi_cascade_irqdomain_init(void)
 {
-	int r;
-
-	r = acpi_table_parse_madt(ACPI_MADT_TYPE_LPC_PIC, pch_lpc_parse_madt, 0);
-	if (r < 0)
-		return r;
-
+	acpi_table_parse_madt(ACPI_MADT_TYPE_LPC_PIC,
+			      pch_lpc_parse_madt, 0);
 	return 0;
 }
 
 int __init pch_pic_acpi_init(struct irq_domain *parent,
 					struct acpi_madt_bio_pic *acpi_pchpic)
 {
-	int ret;
+	int ret, vec_base;
 	struct fwnode_handle *domain_handle;
 
-	if (find_pch_pic(acpi_pchpic->gsi_base) >= 0)
-		return 0;
+	vec_base = acpi_pchpic->gsi_base - GSI_MIN_PCH_IRQ;
 
 	domain_handle = irq_domain_alloc_fwnode(&acpi_pchpic->address);
 	if (!domain_handle) {
@@ -363,7 +359,7 @@ int __init pch_pic_acpi_init(struct irq_domain *parent,
 	}
 
 	ret = pch_pic_init(acpi_pchpic->address, acpi_pchpic->size,
-				0, parent, domain_handle, acpi_pchpic->gsi_base);
+				vec_base, parent, domain_handle, acpi_pchpic->gsi_base);
 
 	if (ret < 0) {
 		irq_domain_free_fwnode(domain_handle);
@@ -371,7 +367,7 @@ int __init pch_pic_acpi_init(struct irq_domain *parent,
 	}
 
 	if (acpi_pchpic->id == 0)
-		ret = acpi_cascade_irqdomain_init();
+		acpi_cascade_irqdomain_init();
 
 	return ret;
 }

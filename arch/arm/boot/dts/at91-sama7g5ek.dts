@@ -789,7 +789,7 @@
 };
 
 &shdwc {
-	debounce-delay-us = <976>;
+	atmel,shdwc-debouncer = <976>;
 	status = "okay";
 
 	input@0 {

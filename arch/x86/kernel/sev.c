@@ -22,9 +22,6 @@
 #include <linux/efi.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
-#include <linux/psp-sev.h>
-#include <linux/dmi.h>
-#include <uapi/linux/sev-guest.h>
 
 #include <asm/cpu_entry_area.h>
 #include <asm/stacktrace.h>
@@ -515,33 +512,6 @@ static enum es_result vc_slow_virt_to_phys(struct ghcb *ghcb, struct es_em_ctxt 
 	return ES_OK;
 }
 
-static enum es_result vc_ioio_check(struct es_em_ctxt *ctxt, u16 port, size_t size)
-{
-	BUG_ON(size > 4);
-
-	if (user_mode(ctxt->regs)) {
-		struct thread_struct *t = &current->thread;
-		struct io_bitmap *iobm = t->io_bitmap;
-		size_t idx;
-
-		if (!iobm)
-			goto fault;
-
-		for (idx = port; idx < port + size; ++idx) {
-			if (test_bit(idx, iobm->bitmap))
-				goto fault;
-		}
-	}
-
-	return ES_OK;
-
-fault:
-	ctxt->fi.vector = X86_TRAP_GP;
-	ctxt->fi.error_code = 0;
-
-	return ES_EXCEPTION;
-}
-
 /* Include code shared with pre-decompression boot stage */
 #include "sev-shared.c"
 
@@ -673,7 +643,7 @@ static u64 __init get_jump_table_addr(void)
 	return ret;
 }
 
-static void pvalidate_pages(unsigned long vaddr, unsigned long npages, bool validate)
+static void pvalidate_pages(unsigned long vaddr, unsigned int npages, bool validate)
 {
 	unsigned long vaddr_end;
 	int rc;
@@ -690,7 +660,7 @@ static void pvalidate_pages(unsigned long vaddr, unsigned long npages, bool vali
 	}
 }
 
-static void __init early_set_pages_state(unsigned long paddr, unsigned long npages, enum psc_op op)
+static void __init early_set_pages_state(unsigned long paddr, unsigned int npages, enum psc_op op)
 {
 	unsigned long paddr_end;
 	u64 val;
@@ -729,7 +699,7 @@ e_term:
 }
 
 void __init early_snp_set_memory_private(unsigned long vaddr, unsigned long paddr,
-					 unsigned long npages)
+					 unsigned int npages)
 {
 	/*
 	 * This can be invoked in early boot while running identity mapped, so
@@ -737,7 +707,7 @@ void __init early_snp_set_memory_private(unsigned long vaddr, unsigned long padd
 	 * This eliminates worries about jump tables or checking boot_cpu_data
 	 * in the cc_platform_has() function.
 	 */
-	if (!(RIP_REL_REF(sev_status) & MSR_AMD64_SEV_SNP_ENABLED))
+	if (!(sev_status & MSR_AMD64_SEV_SNP_ENABLED))
 		return;
 
 	 /*
@@ -751,7 +721,7 @@ void __init early_snp_set_memory_private(unsigned long vaddr, unsigned long padd
 }
 
 void __init early_snp_set_memory_shared(unsigned long vaddr, unsigned long paddr,
-					unsigned long npages)
+					unsigned int npages)
 {
 	/*
 	 * This can be invoked in early boot while running identity mapped, so
@@ -759,7 +729,7 @@ void __init early_snp_set_memory_shared(unsigned long vaddr, unsigned long paddr
 	 * This eliminates worries about jump tables or checking boot_cpu_data
 	 * in the cc_platform_has() function.
 	 */
-	if (!(RIP_REL_REF(sev_status) & MSR_AMD64_SEV_SNP_ENABLED))
+	if (!(sev_status & MSR_AMD64_SEV_SNP_ENABLED))
 		return;
 
 	/* Invalidate the memory pages before they are marked shared in the RMP table. */
@@ -767,6 +737,21 @@ void __init early_snp_set_memory_shared(unsigned long vaddr, unsigned long paddr
 
 	 /* Ask hypervisor to mark the memory pages shared in the RMP table. */
 	early_set_pages_state(paddr, npages, SNP_PAGE_STATE_SHARED);
+}
+
+void __init snp_prep_memory(unsigned long paddr, unsigned int sz, enum psc_op op)
+{
+	unsigned long vaddr, npages;
+
+	vaddr = (unsigned long)__va(paddr);
+	npages = PAGE_ALIGN(sz) >> PAGE_SHIFT;
+
+	if (op == SNP_PAGE_STATE_PRIVATE)
+		early_snp_set_memory_private(vaddr, paddr, npages);
+	else if (op == SNP_PAGE_STATE_SHARED)
+		early_snp_set_memory_shared(vaddr, paddr, npages);
+	else
+		WARN(1, "invalid memory op %d\n", op);
 }
 
 static int vmgexit_psc(struct snp_psc_desc *desc)
@@ -892,7 +877,7 @@ static void __set_pages_state(struct snp_psc_desc *data, unsigned long vaddr,
 		sev_es_terminate(SEV_TERM_SET_LINUX, GHCB_TERM_PSC);
 }
 
-static void set_pages_state(unsigned long vaddr, unsigned long npages, int op)
+static void set_pages_state(unsigned long vaddr, unsigned int npages, int op)
 {
 	unsigned long vaddr_end, next_vaddr;
 	struct snp_psc_desc *desc;
@@ -917,7 +902,7 @@ static void set_pages_state(unsigned long vaddr, unsigned long npages, int op)
 	kfree(desc);
 }
 
-void snp_set_memory_shared(unsigned long vaddr, unsigned long npages)
+void snp_set_memory_shared(unsigned long vaddr, unsigned int npages)
 {
 	if (!cc_platform_has(CC_ATTR_GUEST_SEV_SNP))
 		return;
@@ -927,7 +912,7 @@ void snp_set_memory_shared(unsigned long vaddr, unsigned long npages)
 	set_pages_state(vaddr, npages, SNP_PAGE_STATE_SHARED);
 }
 
-void snp_set_memory_private(unsigned long vaddr, unsigned long npages)
+void snp_set_memory_private(unsigned long vaddr, unsigned int npages)
 {
 	if (!cc_platform_has(CC_ATTR_GUEST_SEV_SNP))
 		return;
@@ -1265,6 +1250,10 @@ void setup_ghcb(void)
 	if (!cc_platform_has(CC_ATTR_GUEST_STATE_ENCRYPT))
 		return;
 
+	/* First make sure the hypervisor talks a supported protocol. */
+	if (!sev_es_negotiate_protocol())
+		sev_es_terminate(SEV_TERM_SET_GEN, GHCB_SEV_ES_GEN_REQ);
+
 	/*
 	 * Check whether the runtime #VC exception handler is active. It uses
 	 * the per-CPU GHCB page which is set up by sev_es_init_vc_handling().
@@ -1278,13 +1267,6 @@ void setup_ghcb(void)
 
 		return;
 	}
-
-	/*
-	 * Make sure the hypervisor talks a supported protocol.
-	 * This gets called only in the BSP boot phase.
-	 */
-	if (!sev_es_negotiate_protocol())
-		sev_es_terminate(SEV_TERM_SET_GEN, GHCB_SEV_ES_GEN_REQ);
 
 	/*
 	 * Clear the boot_ghcb. The first exception comes in before the bss
@@ -1569,9 +1551,6 @@ static enum es_result vc_handle_mmio(struct ghcb *ghcb, struct es_em_ctxt *ctxt)
 		if (!reg_data)
 			return ES_DECODE_FAILED;
 	}
-
-	if (user_mode(ctxt->regs))
-		return ES_UNSUPPORTED;
 
 	switch (mmio) {
 	case MMIO_WRITE:
@@ -2138,17 +2117,6 @@ void __init __noreturn snp_abort(void)
 	sev_es_terminate(SEV_TERM_SET_GEN, GHCB_SNP_UNSUPPORTED);
 }
 
-/*
- * SEV-SNP guests should only execute dmi_setup() if EFI_CONFIG_TABLES are
- * enabled, as the alternative (fallback) logic for DMI probing in the legacy
- * ROM region can cause a crash since this region is not pre-validated.
- */
-void __init snp_dmi_setup(void)
-{
-	if (efi_enabled(EFI_CONFIG_TABLES))
-		dmi_setup();
-}
-
 static void dump_cpuid_table(void)
 {
 	const struct snp_cpuid_table *cpuid_table = snp_cpuid_get_table();
@@ -2207,7 +2175,7 @@ static int __init init_sev_config(char *str)
 }
 __setup("sev=", init_sev_config);
 
-int snp_issue_guest_request(u64 exit_code, struct snp_req_data *input, struct snp_guest_request_ioctl *rio)
+int snp_issue_guest_request(u64 exit_code, struct snp_req_data *input, unsigned long *fw_err)
 {
 	struct ghcb_state state;
 	struct es_em_ctxt ctxt;
@@ -2215,7 +2183,8 @@ int snp_issue_guest_request(u64 exit_code, struct snp_req_data *input, struct sn
 	struct ghcb *ghcb;
 	int ret;
 
-	rio->exitinfo2 = SEV_RET_NO_FW_CALL;
+	if (!fw_err)
+		return -EINVAL;
 
 	/*
 	 * __sev_get_ghcb() needs to run with IRQs disabled because it is using
@@ -2240,16 +2209,16 @@ int snp_issue_guest_request(u64 exit_code, struct snp_req_data *input, struct sn
 	if (ret)
 		goto e_put;
 
-	rio->exitinfo2 = ghcb->save.sw_exit_info_2;
-	switch (rio->exitinfo2) {
+	*fw_err = ghcb->save.sw_exit_info_2;
+	switch (*fw_err) {
 	case 0:
 		break;
 
-	case SNP_GUEST_VMM_ERR(SNP_GUEST_VMM_ERR_BUSY):
+	case SNP_GUEST_REQ_ERR_BUSY:
 		ret = -EAGAIN;
 		break;
 
-	case SNP_GUEST_VMM_ERR(SNP_GUEST_VMM_ERR_INVALID_LEN):
+	case SNP_GUEST_REQ_INVALID_LEN:
 		/* Number of expected pages are returned in RBX */
 		if (exit_code == SVM_VMGEXIT_EXT_GUEST_REQUEST) {
 			input->data_npages = ghcb_get_rbx(ghcb);

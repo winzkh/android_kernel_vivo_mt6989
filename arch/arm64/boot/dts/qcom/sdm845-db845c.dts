@@ -66,8 +66,8 @@
 			function = LED_FUNCTION_INDICATOR;
 			color = <LED_COLOR_ID_GREEN>;
 			gpios = <&pm8998_gpio 13 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "panic-indicator";
 			default-state = "off";
-			panic-indicator;
 		};
 
 		led-1 {
@@ -97,14 +97,6 @@
 			hdmi_con: endpoint {
 				remote-endpoint = <&lt9611_out>;
 			};
-		};
-	};
-
-	reserved-memory {
-		/* Cont splash region set up by the bootloader */
-		cont_splash_mem: framebuffer@9d400000 {
-			reg = <0x0 0x9d400000 0x0 0x2400000>;
-			no-map;
 		};
 	};
 
@@ -271,7 +263,7 @@
 };
 
 &apps_rsc {
-	regulators-0 {
+	pm8998-rpmh-regulators {
 		compatible = "qcom,pm8998-rpmh-regulators";
 		qcom,pmic-id = "a";
 		vdd-s1-supply = <&vph_pwr>;
@@ -396,7 +388,7 @@
 		};
 	};
 
-	regulators-1 {
+	pmi8998-rpmh-regulators {
 		compatible = "qcom,pmi8998-rpmh-regulators";
 		qcom,pmic-id = "b";
 
@@ -520,7 +512,6 @@
 };
 
 &mdss {
-	memory-region = <&cont_splash_mem>;
 	status = "okay";
 };
 
@@ -532,7 +523,7 @@
 &pcie0 {
 	status = "okay";
 	perst-gpios = <&tlmm 35 GPIO_ACTIVE_LOW>;
-	wake-gpios = <&tlmm 134 GPIO_ACTIVE_HIGH>;
+	enable-gpio = <&tlmm 134 GPIO_ACTIVE_HIGH>;
 
 	vddpe-3v3-supply = <&pcie0_3p3v_dual>;
 

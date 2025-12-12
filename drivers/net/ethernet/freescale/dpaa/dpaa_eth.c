@@ -283,8 +283,7 @@ static int dpaa_stop(struct net_device *net_dev)
 {
 	struct mac_device *mac_dev;
 	struct dpaa_priv *priv;
-	int i, error;
-	int err = 0;
+	int i, err, error;
 
 	priv = netdev_priv(net_dev);
 	mac_dev = priv->mac_dev;

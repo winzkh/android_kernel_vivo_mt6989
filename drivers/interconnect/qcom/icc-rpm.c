@@ -11,6 +11,7 @@
 #include <linux/of_device.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/pm_domain.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
 
@@ -497,6 +498,12 @@ regmap_done:
 	ret = clk_bulk_prepare_enable(qp->num_clks, qp->bus_clks);
 	if (ret)
 		return ret;
+
+	if (desc->has_bus_pd) {
+		ret = dev_pm_domain_attach(dev, true);
+		if (ret)
+			return ret;
+	}
 
 	provider = &qp->provider;
 	provider->dev = dev;

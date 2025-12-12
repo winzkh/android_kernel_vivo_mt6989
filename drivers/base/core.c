@@ -337,12 +337,10 @@ static bool device_is_ancestor(struct device *dev, struct device *target)
 	return false;
 }
 
-#define DL_MARKER_FLAGS		(DL_FLAG_INFERRED | \
-				 DL_FLAG_CYCLE | \
-				 DL_FLAG_MANAGED)
 static inline bool device_link_flag_is_sync_state_only(u32 flags)
 {
-	return (flags & ~DL_MARKER_FLAGS) == DL_FLAG_SYNC_STATE_ONLY;
+	return (flags & ~(DL_FLAG_INFERRED | DL_FLAG_CYCLE)) ==
+		(DL_FLAG_SYNC_STATE_ONLY | DL_FLAG_MANAGED);
 }
 
 /**
@@ -2056,14 +2054,9 @@ static int fw_devlink_create_devlink(struct device *con,
 
 	/*
 	 * SYNC_STATE_ONLY device links don't block probing and supports cycles.
-	 * So, one might expect that cycle detection isn't necessary for them.
-	 * However, if the device link was marked as SYNC_STATE_ONLY because
-	 * it's part of a cycle, then we still need to do cycle detection. This
-	 * is because the consumer and supplier might be part of multiple cycles
-	 * and we need to detect all those cycles.
+	 * So cycle detection isn't necessary and shouldn't be done.
 	 */
-	if (!device_link_flag_is_sync_state_only(flags) ||
-	    flags & DL_FLAG_CYCLE) {
+	if (!(flags & DL_FLAG_SYNC_STATE_ONLY)) {
 		device_links_write_lock();
 		if (__fw_devlink_relax_cycles(con, sup_handle)) {
 			__fwnode_link_cycle(link);
@@ -3862,17 +3855,6 @@ void device_del(struct device *dev)
 	device_platform_notify_remove(dev);
 	device_links_purge(dev);
 
-	/*
-	 * If a device does not have a driver attached, we need to clean
-	 * up any managed resources. We do this in device_release(), but
-	 * it's never called (and we leak the device) if a managed
-	 * resource holds a reference to the device. So release all
-	 * managed resources here, like we do in driver_detach(). We
-	 * still need to do so again in device_release() in case someone
-	 * adds a new resource after this point, though.
-	 */
-	devres_release_all(dev);
-
 	if (dev->bus)
 		blocking_notifier_call_chain(&dev->bus->p->bus_notifier,
 					     BUS_NOTIFY_REMOVED_DEVICE, dev);
@@ -4771,12 +4753,25 @@ out:
 }
 EXPORT_SYMBOL_GPL(device_change_owner);
 
+#if IS_ENABLED(CONFIG_MTK_AEE_UT)
+static void (*last_shutdown_device_callback)(const char *str);
+void shutdown_register_callback(void (*fn)(const char *str))
+{
+	last_shutdown_device_callback = fn;
+}
+EXPORT_SYMBOL(shutdown_register_callback);
+#endif
+
 /**
  * device_shutdown - call ->shutdown() on each device to shutdown.
  */
 void device_shutdown(void)
 {
 	struct device *dev, *parent;
+
+#if IS_ENABLED(CONFIG_MTK_AEE_UT)
+	char shutdown_device[64];
+#endif
 
 	wait_for_device_probe();
 	device_block_probing();
@@ -4806,6 +4801,16 @@ void device_shutdown(void)
 		 */
 		list_del_init(&dev->kobj.entry);
 		spin_unlock(&devices_kset->list_lock);
+
+#if IS_ENABLED(CONFIG_MTK_AEE_UT)
+		memset(shutdown_device, 0, sizeof(shutdown_device));
+		if (dev->driver && dev->driver->name) {
+			scnprintf(shutdown_device, sizeof(shutdown_device),
+				"%s", dev->driver->name);
+		}
+		if (last_shutdown_device_callback)
+			last_shutdown_device_callback(shutdown_device);
+#endif
 
 		/* hold lock to avoid race with probe/release */
 		if (parent)

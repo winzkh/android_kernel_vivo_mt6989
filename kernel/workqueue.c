@@ -51,6 +51,9 @@
 #include <linux/sched/isolation.h>
 #include <linux/nmi.h>
 #include <linux/kvm_para.h>
+#if IS_ENABLED(CONFIG_MTK_PANIC_ON_WARN)
+#include <linux/sched/debug.h>
+#endif
 
 #include "workqueue_internal.h"
 
@@ -705,17 +708,12 @@ static void clear_work_data(struct work_struct *work)
 	set_work_data(work, WORK_STRUCT_NO_POOL, 0);
 }
 
-static inline struct pool_workqueue *work_struct_pwq(unsigned long data)
-{
-	return (struct pool_workqueue *)(data & WORK_STRUCT_WQ_DATA_MASK);
-}
-
 static struct pool_workqueue *get_work_pwq(struct work_struct *work)
 {
 	unsigned long data = atomic_long_read(&work->data);
 
 	if (data & WORK_STRUCT_PWQ)
-		return work_struct_pwq(data);
+		return (void *)(data & WORK_STRUCT_WQ_DATA_MASK);
 	else
 		return NULL;
 }
@@ -743,7 +741,8 @@ static struct worker_pool *get_work_pool(struct work_struct *work)
 	assert_rcu_or_pool_mutex();
 
 	if (data & WORK_STRUCT_PWQ)
-		return work_struct_pwq(data)->pool;
+		return ((struct pool_workqueue *)
+			(data & WORK_STRUCT_WQ_DATA_MASK))->pool;
 
 	pool_id = data >> WORK_OFFQ_POOL_SHIFT;
 	if (pool_id == WORK_OFFQ_POOL_NONE)
@@ -764,7 +763,8 @@ static int get_work_pool_id(struct work_struct *work)
 	unsigned long data = atomic_long_read(&work->data);
 
 	if (data & WORK_STRUCT_PWQ)
-		return work_struct_pwq(data)->pool->id;
+		return ((struct pool_workqueue *)
+			(data & WORK_STRUCT_WQ_DATA_MASK))->pool->id;
 
 	return data >> WORK_OFFQ_POOL_SHIFT;
 }
@@ -879,6 +879,9 @@ void wq_worker_running(struct task_struct *task)
 	if (!worker->sleeping)
 		return;
 
+#if IS_ENABLED(CONFIG_MTK_PANIC_ON_WARN)
+	worker->wakeup_time = jiffies;
+#endif
 	/*
 	 * If preempted by unbind_workers() between the WORKER_NOT_RUNNING check
 	 * and the nr_running increment below, we may ruin the nr_running reset
@@ -912,6 +915,16 @@ void wq_worker_sleeping(struct task_struct *task)
 	if (worker->flags & WORKER_NOT_RUNNING)
 		return;
 
+#if IS_ENABLED(CONFIG_MTK_PANIC_ON_WARN)
+	worker->sleep_time = jiffies;
+	if (worker->trigger) {
+		if (worker->start_run_work > worker->wakeup_time)
+			worker->accumulate_time = worker->sleep_time - worker->start_run_work;
+		else
+			worker->accumulate_time =
+				worker->accumulate_time + worker->sleep_time - worker->wakeup_time;
+	}
+#endif
 	pool = worker->pool;
 
 	/* Return if preempted before wq_worker_running() was reached */
@@ -1781,7 +1794,7 @@ bool queue_rcu_work(struct workqueue_struct *wq, struct rcu_work *rwork)
 
 	if (!test_and_set_bit(WORK_STRUCT_PENDING_BIT, work_data_bits(work))) {
 		rwork->wq = wq;
-		call_rcu_hurry(&rwork->rcu, rcu_work_rcufn);
+		call_rcu(&rwork->rcu, rcu_work_rcufn);
 		return true;
 	}
 
@@ -2197,6 +2210,13 @@ __acquires(&pool->lock)
 	bool cpu_intensive = pwq->wq->flags & WQ_CPU_INTENSIVE;
 	unsigned long work_data;
 	struct worker *collision;
+#if IS_ENABLED(CONFIG_MTK_PANIC_ON_WARN)
+	work_func_t toolong_func = work->func;
+	unsigned long start_time = 0;
+	unsigned long end_time = 0;
+	unsigned int diff = 0;
+	unsigned int accumute = 0;
+#endif
 #ifdef CONFIG_LOCKDEP
 	/*
 	 * It is permissible to free the struct work_struct from
@@ -2296,7 +2316,27 @@ __acquires(&pool->lock)
 	 */
 	lockdep_invariant_state(true);
 	trace_workqueue_execute_start(work);
+#if IS_ENABLED(CONFIG_MTK_PANIC_ON_WARN)
+	worker->start_run_work = start_time = jiffies;
+	worker->trigger = 1;
+	worker->accumulate_time = 0;
+#endif
 	worker->current_func(work);
+#if IS_ENABLED(CONFIG_MTK_PANIC_ON_WARN)
+	worker->end_run_work = end_time = jiffies;
+	worker->trigger = 0;
+	if (worker->start_run_work > worker->wakeup_time)
+		worker->accumulate_time = worker->end_run_work - worker->start_run_work;
+	else
+		worker->accumulate_time =
+			worker->accumulate_time + worker->end_run_work - worker->wakeup_time;
+	diff = jiffies_to_msecs(end_time - start_time);
+	accumute = jiffies_to_msecs(worker->accumulate_time);
+	if (diff > 13000)
+		pr_info("[wqto]:[<0x%lx>]%pS, ID=%d, poolID=%d, dur=%u, run=%u, str=%lu, end=%lu.\n",
+			(unsigned long)toolong_func, toolong_func, worker->id, worker->pool->id,
+			diff, accumute, start_time, end_time);
+#endif
 	/*
 	 * While we must be careful to not use "work" after this, the trace
 	 * point will only record its address.
@@ -2312,6 +2352,9 @@ __acquires(&pool->lock)
 		       worker->current_func);
 		debug_show_held_locks(current);
 		dump_stack();
+#if IS_ENABLED(CONFIG_MTK_PANIC_ON_WARN)
+		BUG();
+#endif
 	}
 
 	/*
@@ -4759,8 +4802,31 @@ static void show_pwq(struct pool_workqueue *pwq)
 	if (has_in_flight) {
 		bool comma = false;
 
+#if IS_ENABLED(CONFIG_MTK_PANIC_ON_WARN)
+		unsigned long lockuptime = jiffies;
+		unsigned long tmpacc;
+#endif
 		pr_info("    in-flight:");
 		hash_for_each(pool->busy_hash, bkt, worker, hentry) {
+#if IS_ENABLED(CONFIG_MTK_PANIC_ON_WARN)
+			if (!worker->sleeping) {
+				if (worker->start_run_work > worker->wakeup_time)
+					tmpacc = lockuptime - worker->start_run_work;
+				else
+					tmpacc = worker->accumulate_time +
+						lockuptime - worker->wakeup_time;
+			} else
+				tmpacc = worker->accumulate_time;
+
+			pr_cont("[wqto]:[<0x%lx>]%pS, lastf:[<0x%lx>]%pS, ID=%d, poolID=%d, ",
+				(unsigned long)(worker->current_func), worker->current_func,
+				(unsigned long)(worker->last_func), worker->last_func,
+				worker->id, worker->pool->id);
+			pr_cont("dur=%u, run=%u, str=%lu, end=%lu, curr=%lu.\n",
+				jiffies_to_msecs(lockuptime - worker->start_run_work),
+				tmpacc == 0 ? 0 : jiffies_to_msecs(tmpacc), worker->start_run_work,
+				worker->end_run_work, lockuptime);
+#endif
 			if (worker->current_pwq != pwq)
 				continue;
 
@@ -4860,16 +4926,10 @@ static void show_one_worker_pool(struct worker_pool *pool)
 	struct worker *worker;
 	bool first = true;
 	unsigned long flags;
-	unsigned long hung = 0;
 
 	raw_spin_lock_irqsave(&pool->lock, flags);
 	if (pool->nr_workers == pool->nr_idle)
 		goto next_pool;
-
-	/* How long the first pending work is waiting for a worker. */
-	if (!list_empty(&pool->worklist))
-		hung = jiffies_to_msecs(jiffies - pool->watchdog_ts) / 1000;
-
 	/*
 	 * Defer printing to avoid deadlocks in console drivers that
 	 * queue work while holding locks also taken in their write
@@ -4878,7 +4938,9 @@ static void show_one_worker_pool(struct worker_pool *pool)
 	printk_deferred_enter();
 	pr_info("pool %d:", pool->id);
 	pr_cont_pool_info(pool);
-	pr_cont(" hung=%lus workers=%d", hung, pool->nr_workers);
+	pr_cont(" hung=%us workers=%d",
+		jiffies_to_msecs(jiffies - pool->watchdog_ts) / 1000,
+		pool->nr_workers);
 	if (pool->manager)
 		pr_cont(" manager: %d",
 			task_pid_nr(pool->manager->task));
@@ -5363,13 +5425,9 @@ static int workqueue_apply_unbound_cpumask(const cpumask_var_t unbound_cpumask)
 	list_for_each_entry(wq, &workqueues, list) {
 		if (!(wq->flags & WQ_UNBOUND))
 			continue;
-
 		/* creating multiple pwqs breaks ordering guarantee */
-		if (!list_empty(&wq->pwqs)) {
-			if (wq->flags & __WQ_ORDERED_EXPLICIT)
-				continue;
-			wq->flags &= ~__WQ_ORDERED;
-		}
+		if (wq->flags & __WQ_ORDERED)
+			continue;
 
 		ctx = apply_wqattrs_prepare(wq, wq->unbound_attrs, unbound_cpumask);
 		if (!ctx) {
@@ -5844,6 +5902,12 @@ static void wq_watchdog_timer_fn(struct timer_list *unused)
 	unsigned long now = jiffies;
 	struct worker_pool *pool;
 	int pi;
+#if IS_ENABLED(CONFIG_MTK_PANIC_ON_WARN)
+	struct worker *worker;
+	work_func_t lockup_func = NULL;
+	work_func_t lockup_func_last = NULL;
+	int bkt;
+#endif
 
 	if (!thresh)
 		return;
@@ -5882,6 +5946,15 @@ static void wq_watchdog_timer_fn(struct timer_list *unused)
 			pr_cont(" stuck for %us!\n",
 				jiffies_to_msecs(now - pool_ts) / 1000);
 			trace_android_vh_wq_lockup_pool(pool->cpu, pool_ts);
+#if IS_ENABLED(CONFIG_MTK_PANIC_ON_WARN)
+			hash_for_each(pool->busy_hash, bkt, worker, hentry) {
+				if (worker->pool != pool)
+					continue;
+				lockup_func = worker->current_func;
+				lockup_func_last = worker->last_func;
+				show_stack(worker->task, NULL, KERN_INFO);
+			}
+#endif
 		}
 	}
 
@@ -5889,7 +5962,13 @@ static void wq_watchdog_timer_fn(struct timer_list *unused)
 
 	if (lockup_detected)
 		show_all_workqueues();
-
+#if IS_ENABLED(CONFIG_MTK_PANIC_ON_WARN)
+	if (lockup_detected && lockup_func) {
+		pr_info("WQ_lockup lastfn: [<0x%lx> %pS]\n",
+			(unsigned long)lockup_func_last, lockup_func_last);
+		pr_err("WQ_lockup: [<%px>] %pS\n", lockup_func, lockup_func);
+	}
+#endif
 	wq_watchdog_reset_touched();
 	mod_timer(&wq_watchdog_timer, jiffies + thresh);
 }

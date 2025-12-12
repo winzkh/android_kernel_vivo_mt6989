@@ -492,10 +492,7 @@ static int gve_rx_append_frags(struct napi_struct *napi,
 		if (!skb)
 			return -1;
 
-		if (rx->ctx.skb_tail == rx->ctx.skb_head)
-			skb_shinfo(rx->ctx.skb_head)->frag_list = skb;
-		else
-			rx->ctx.skb_tail->next = skb;
+		skb_shinfo(rx->ctx.skb_tail)->frag_list = skb;
 		rx->ctx.skb_tail = skb;
 		num_frags = 0;
 	}

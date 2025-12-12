@@ -43,7 +43,7 @@ MODULE_LICENSE("GPL");
 static inline bool lock_wqueue(struct watch_queue *wqueue)
 {
 	spin_lock_bh(&wqueue->lock);
-	if (unlikely(!wqueue->pipe)) {
+	if (unlikely(wqueue->defunct)) {
 		spin_unlock_bh(&wqueue->lock);
 		return false;
 	}
@@ -104,6 +104,9 @@ static bool post_one_notification(struct watch_queue *wqueue,
 	struct page *page;
 	unsigned int head, tail, mask, note, offset, len;
 	bool done = false;
+
+	if (!pipe)
+		return false;
 
 	spin_lock_irq(&pipe->rd_wait.lock);
 
@@ -332,7 +335,7 @@ long watch_queue_set_filter(struct pipe_inode_info *pipe,
 	    filter.__reserved != 0)
 		return -EINVAL;
 
-	tf = memdup_array_user(_filter->filters, filter.nr_filters, sizeof(*tf));
+	tf = memdup_user(_filter->filters, filter.nr_filters * sizeof(*tf));
 	if (IS_ERR(tf))
 		return PTR_ERR(tf);
 
@@ -601,11 +604,8 @@ void watch_queue_clear(struct watch_queue *wqueue)
 	rcu_read_lock();
 	spin_lock_bh(&wqueue->lock);
 
-	/*
-	 * This pipe can be freed by callers like free_pipe_info().
-	 * Removing this reference also prevents new notifications.
-	 */
-	wqueue->pipe = NULL;
+	/* Prevent new notifications from being stored. */
+	wqueue->defunct = true;
 
 	while (!hlist_empty(&wqueue->watches)) {
 		watch = hlist_entry(wqueue->watches.first, struct watch, queue_node);

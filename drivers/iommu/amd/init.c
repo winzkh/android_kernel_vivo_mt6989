@@ -160,7 +160,6 @@ static int amd_iommu_xt_mode = IRQ_REMAP_XAPIC_MODE;
 static bool amd_iommu_detected;
 static bool amd_iommu_disabled __initdata;
 static bool amd_iommu_force_enable __initdata;
-static bool amd_iommu_irtcachedis;
 static int amd_iommu_target_ivhd_type;
 
 /* Global EFR and EFR2 registers */
@@ -478,9 +477,6 @@ static void iommu_disable(struct amd_iommu *iommu)
 
 	/* Disable IOMMU hardware itself */
 	iommu_feature_disable(iommu, CONTROL_IOMMU_EN);
-
-	/* Clear IRTE cache disabling bit */
-	iommu_feature_disable(iommu, CONTROL_IRTCACHEDIS);
 }
 
 /*
@@ -753,30 +749,6 @@ void amd_iommu_restart_event_logging(struct amd_iommu *iommu)
 {
 	iommu_feature_disable(iommu, CONTROL_EVT_LOG_EN);
 	iommu_feature_enable(iommu, CONTROL_EVT_LOG_EN);
-}
-
-/*
- * This function restarts event logging in case the IOMMU experienced
- * an GA log overflow.
- */
-void amd_iommu_restart_ga_log(struct amd_iommu *iommu)
-{
-	u32 status;
-
-	status = readl(iommu->mmio_base + MMIO_STATUS_OFFSET);
-	if (status & MMIO_STATUS_GALOG_RUN_MASK)
-		return;
-
-	pr_info_ratelimited("IOMMU GA Log restarting\n");
-
-	iommu_feature_disable(iommu, CONTROL_GALOG_EN);
-	iommu_feature_disable(iommu, CONTROL_GAINT_EN);
-
-	writel(MMIO_STATUS_GALOG_OVERFLOW_MASK,
-	       iommu->mmio_base + MMIO_STATUS_OFFSET);
-
-	iommu_feature_enable(iommu, CONTROL_GAINT_EN);
-	iommu_feature_enable(iommu, CONTROL_GALOG_EN);
 }
 
 /*
@@ -2047,9 +2019,6 @@ static int __init iommu_init_pci(struct amd_iommu *iommu)
 	/* Prevent binding other PCI device drivers to IOMMU devices */
 	iommu->dev->match_driver = false;
 
-	/* ACPI _PRT won't have an IRQ for IOMMU */
-	iommu->dev->irq_managed = 1;
-
 	pci_read_config_dword(iommu->dev, cap_ptr + MMIO_CAP_HDR_OFFSET,
 			      &iommu->cap);
 
@@ -2707,33 +2676,6 @@ static void iommu_enable_ga(struct amd_iommu *iommu)
 #endif
 }
 
-static void iommu_disable_irtcachedis(struct amd_iommu *iommu)
-{
-	iommu_feature_disable(iommu, CONTROL_IRTCACHEDIS);
-}
-
-static void iommu_enable_irtcachedis(struct amd_iommu *iommu)
-{
-	u64 ctrl;
-
-	if (!amd_iommu_irtcachedis)
-		return;
-
-	/*
-	 * Note:
-	 * The support for IRTCacheDis feature is dertermined by
-	 * checking if the bit is writable.
-	 */
-	iommu_feature_enable(iommu, CONTROL_IRTCACHEDIS);
-	ctrl = readq(iommu->mmio_base +  MMIO_CONTROL_OFFSET);
-	ctrl &= (1ULL << CONTROL_IRTCACHEDIS);
-	if (ctrl)
-		iommu->irtcachedis_enabled = true;
-	pr_info("iommu%d (%#06x) : IRT cache is %s\n",
-		iommu->index, iommu->devid,
-		iommu->irtcachedis_enabled ? "disabled" : "enabled");
-}
-
 static void early_enable_iommu(struct amd_iommu *iommu)
 {
 	iommu_disable(iommu);
@@ -2744,7 +2686,6 @@ static void early_enable_iommu(struct amd_iommu *iommu)
 	iommu_set_exclusion_range(iommu);
 	iommu_enable_ga(iommu);
 	iommu_enable_xt(iommu);
-	iommu_enable_irtcachedis(iommu);
 	iommu_enable(iommu);
 	iommu_flush_all_caches(iommu);
 }
@@ -2795,12 +2736,10 @@ static void early_enable_iommus(void)
 		for_each_iommu(iommu) {
 			iommu_disable_command_buffer(iommu);
 			iommu_disable_event_buffer(iommu);
-			iommu_disable_irtcachedis(iommu);
 			iommu_enable_command_buffer(iommu);
 			iommu_enable_event_buffer(iommu);
 			iommu_enable_ga(iommu);
 			iommu_enable_xt(iommu);
-			iommu_enable_irtcachedis(iommu);
 			iommu_set_device_table(iommu);
 			iommu_flush_all_caches(iommu);
 		}
@@ -3448,8 +3387,6 @@ static int __init parse_amd_iommu_options(char *str)
 			amd_iommu_pgtable = AMD_IOMMU_V1;
 		} else if (strncmp(str, "pgtbl_v2", 8) == 0) {
 			amd_iommu_pgtable = AMD_IOMMU_V2;
-		} else if (strncmp(str, "irtcachedis", 11) == 0) {
-			amd_iommu_irtcachedis = true;
 		} else {
 			pr_notice("Unknown option - '%s'\n", str);
 		}

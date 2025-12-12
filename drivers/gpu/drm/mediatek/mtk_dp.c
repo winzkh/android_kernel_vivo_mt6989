@@ -806,9 +806,10 @@ static int mtk_dp_aux_wait_for_completion(struct mtk_dp *mtk_dp, bool is_read)
 }
 
 static int mtk_dp_aux_do_transfer(struct mtk_dp *mtk_dp, bool is_read, u8 cmd,
-				  u32 addr, u8 *buf, size_t length, u8 *reply_cmd)
+				  u32 addr, u8 *buf, size_t length)
 {
 	int ret;
+	u32 reply_cmd;
 
 	if (is_read && (length > DP_AUX_MAX_PAYLOAD_BYTES ||
 			(cmd == DP_AUX_NATIVE_READ && !length)))
@@ -840,14 +841,14 @@ static int mtk_dp_aux_do_transfer(struct mtk_dp *mtk_dp, bool is_read, u8 cmd,
 	/* Wait for feedback from sink device. */
 	ret = mtk_dp_aux_wait_for_completion(mtk_dp, is_read);
 
-	*reply_cmd = mtk_dp_read(mtk_dp, MTK_DP_AUX_P0_3624) &
-		     AUX_RX_REPLY_COMMAND_AUX_TX_P0_MASK;
+	reply_cmd = mtk_dp_read(mtk_dp, MTK_DP_AUX_P0_3624) &
+		    AUX_RX_REPLY_COMMAND_AUX_TX_P0_MASK;
 
-	if (ret) {
+	if (ret || reply_cmd) {
 		u32 phy_status = mtk_dp_read(mtk_dp, MTK_DP_AUX_P0_3628) &
 				 AUX_RX_PHY_STATE_AUX_TX_P0_MASK;
 		if (phy_status != AUX_RX_PHY_STATE_AUX_TX_P0_RX_IDLE) {
-			dev_err(mtk_dp->dev,
+			drm_err(mtk_dp->drm_dev,
 				"AUX Rx Aux hang, need SW reset\n");
 			return -EIO;
 		}
@@ -1588,9 +1589,7 @@ static int mtk_dp_parse_capabilities(struct mtk_dp *mtk_dp)
 	u8 val;
 	ssize_t ret;
 
-	ret = drm_dp_read_dpcd_caps(&mtk_dp->aux, mtk_dp->rx_cap);
-	if (ret < 0)
-		return ret;
+	drm_dp_read_dpcd_caps(&mtk_dp->aux, mtk_dp->rx_cap);
 
 	if (drm_dp_tps4_supported(mtk_dp->rx_cap))
 		mtk_dp->train_info.channel_eq_pattern = DP_TRAINING_PATTERN_4;
@@ -1617,13 +1616,10 @@ static int mtk_dp_parse_capabilities(struct mtk_dp *mtk_dp)
 			return ret == 0 ? -EIO : ret;
 		}
 
-		if (val) {
-			ret = drm_dp_dpcd_writeb(&mtk_dp->aux,
-						 DP_DEVICE_SERVICE_IRQ_VECTOR_ESI0,
-						 val);
-			if (ret < 0)
-				return ret;
-		}
+		if (val)
+			drm_dp_dpcd_writeb(&mtk_dp->aux,
+					   DP_DEVICE_SERVICE_IRQ_VECTOR_ESI0,
+					   val);
 	}
 
 	return 0;
@@ -1827,8 +1823,7 @@ static irqreturn_t mtk_dp_hpd_event_thread(int hpd, void *dev)
 	spin_unlock_irqrestore(&mtk_dp->irq_thread_lock, flags);
 
 	if (status & MTK_DP_THREAD_CABLE_STATE_CHG) {
-		if (mtk_dp->bridge.dev)
-			drm_helper_hpd_irq_event(mtk_dp->bridge.dev);
+		drm_helper_hpd_irq_event(mtk_dp->bridge.dev);
 
 		if (!mtk_dp->train_info.cable_plugged_in) {
 			mtk_dp_disable_sdp_aui(mtk_dp);
@@ -1983,6 +1978,7 @@ static struct edid *mtk_dp_get_edid(struct drm_bridge *bridge,
 	bool enabled = mtk_dp->enabled;
 	struct edid *new_edid = NULL;
 	struct mtk_dp_audio_cfg *audio_caps = &mtk_dp->info.audio_cur_cfg;
+	struct cea_sad *sads;
 
 	if (!enabled) {
 		drm_bridge_chain_pre_enable(bridge);
@@ -2005,16 +2001,11 @@ static struct edid *mtk_dp_get_edid(struct drm_bridge *bridge,
 	 */
 	if (mtk_dp_parse_capabilities(mtk_dp)) {
 		drm_err(mtk_dp->drm_dev, "Can't parse capabilities\n");
-		kfree(new_edid);
 		new_edid = NULL;
 	}
 
 	if (new_edid) {
-		struct cea_sad *sads;
-
 		audio_caps->sad_count = drm_edid_to_sad(new_edid, &sads);
-		kfree(sads);
-
 		audio_caps->detect_monitor = drm_detect_monitor_audio(new_edid);
 	}
 
@@ -2066,7 +2057,7 @@ static ssize_t mtk_dp_aux_transfer(struct drm_dp_aux *mtk_aux,
 		is_read = true;
 		break;
 	default:
-		dev_err(mtk_dp->dev, "invalid aux cmd = %d\n",
+		drm_err(mtk_aux->drm_dev, "invalid aux cmd = %d\n",
 			msg->request);
 		ret = -EINVAL;
 		goto err;
@@ -2079,16 +2070,17 @@ static ssize_t mtk_dp_aux_transfer(struct drm_dp_aux *mtk_aux,
 		ret = mtk_dp_aux_do_transfer(mtk_dp, is_read, request,
 					     msg->address + accessed_bytes,
 					     msg->buffer + accessed_bytes,
-					     to_access, &msg->reply);
+					     to_access);
 
 		if (ret) {
-			dev_info(mtk_dp->dev,
+			drm_info(mtk_dp->drm_dev,
 				 "Failed to do AUX transfer: %d\n", ret);
 			goto err;
 		}
 		accessed_bytes += to_access;
 	} while (accessed_bytes < msg->size);
 
+	msg->reply = DP_AUX_NATIVE_REPLY_ACK | DP_AUX_I2C_REPLY_ACK;
 	return msg->size;
 err:
 	msg->reply = DP_AUX_NATIVE_REPLY_NACK | DP_AUX_I2C_REPLY_NACK;
@@ -2669,4 +2661,3 @@ MODULE_AUTHOR("Markus Schneider-Pargmann <msp@baylibre.com>");
 MODULE_AUTHOR("Bo-Chen Chen <rex-bc.chen@mediatek.com>");
 MODULE_DESCRIPTION("MediaTek DisplayPort Driver");
 MODULE_LICENSE("GPL");
-MODULE_SOFTDEP("pre: phy_mtk_dp");

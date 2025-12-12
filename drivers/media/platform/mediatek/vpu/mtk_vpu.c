@@ -562,16 +562,14 @@ static int load_requested_vpu(struct mtk_vpu *vpu,
 int vpu_load_firmware(struct platform_device *pdev)
 {
 	struct mtk_vpu *vpu;
-	struct device *dev;
+	struct device *dev = &pdev->dev;
 	struct vpu_run *run;
 	int ret;
 
 	if (!pdev) {
-		pr_err("VPU platform device is invalid\n");
+		dev_err(dev, "VPU platform device is invalid\n");
 		return -EINVAL;
 	}
-
-	dev = &pdev->dev;
 
 	vpu = platform_get_drvdata(pdev);
 	run = &vpu->run;
@@ -635,7 +633,7 @@ OUT_LOAD_FW:
 }
 EXPORT_SYMBOL_GPL(vpu_load_firmware);
 
-static void vpu_init_ipi_handler(void *data, unsigned int len, void *priv)
+static void vpu_init_ipi_handler(const void *data, unsigned int len, void *priv)
 {
 	struct mtk_vpu *vpu = priv;
 	const struct vpu_run *run = data;

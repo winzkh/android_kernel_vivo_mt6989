@@ -383,12 +383,7 @@ struct brcmf_scan_params_le {
 				 * fixed parameter portion is assumed, otherwise
 				 * ssid in the fixed portion is ignored
 				 */
-	union {
-		__le16 padding;	/* Reserve space for at least 1 entry for abort
-				 * which uses an on stack brcmf_scan_params_le
-				 */
-		DECLARE_FLEX_ARRAY(__le16, channel_list);	/* chanspecs */
-	};
+	__le16 channel_list[1];	/* list of chanspecs */
 };
 
 struct brcmf_scan_results {

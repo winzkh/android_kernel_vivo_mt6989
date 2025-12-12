@@ -208,7 +208,7 @@ static inline int pmd_bad(pmd_t pmd)
 static inline int pmd_present(pmd_t pmd)
 {
 	if (unlikely(pmd_val(pmd) & _PAGE_HUGE))
-		return !!(pmd_val(pmd) & (_PAGE_PRESENT | _PAGE_PROTNONE | _PAGE_PRESENT_INVALID));
+		return !!(pmd_val(pmd) & (_PAGE_PRESENT | _PAGE_PROTNONE));
 
 	return pmd_val(pmd) != (unsigned long)invalid_pte_table;
 }
@@ -525,7 +525,6 @@ static inline pmd_t pmd_modify(pmd_t pmd, pgprot_t newprot)
 
 static inline pmd_t pmd_mkinvalid(pmd_t pmd)
 {
-	pmd_val(pmd) |= _PAGE_PRESENT_INVALID;
 	pmd_val(pmd) &= ~(_PAGE_PRESENT | _PAGE_VALID | _PAGE_DIRTY | _PAGE_PROTNONE);
 
 	return pmd;
@@ -559,9 +558,6 @@ static inline long pmd_protnone(pmd_t pmd)
 	return (pmd_val(pmd) & _PAGE_PROTNONE);
 }
 #endif /* CONFIG_NUMA_BALANCING */
-
-#define pmd_leaf(pmd)		((pmd_val(pmd) & _PAGE_HUGE) != 0)
-#define pud_leaf(pud)		((pud_val(pud) & _PAGE_HUGE) != 0)
 
 /*
  * We provide our own get_unmapped area to cope with the virtual aliasing

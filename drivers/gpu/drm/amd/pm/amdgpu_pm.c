@@ -758,7 +758,7 @@ static ssize_t amdgpu_set_pp_od_clk_voltage(struct device *dev,
 	if (adev->in_suspend && !adev->in_runpm)
 		return -EPERM;
 
-	if (count > 127 || count == 0)
+	if (count > 127)
 		return -EINVAL;
 
 	if (*buf == 's')
@@ -778,8 +778,7 @@ static ssize_t amdgpu_set_pp_od_clk_voltage(struct device *dev,
 	else
 		return -EINVAL;
 
-	memcpy(buf_cpy, buf, count);
-	buf_cpy[count] = 0;
+	memcpy(buf_cpy, buf, count+1);
 
 	tmp_str = buf_cpy;
 
@@ -795,9 +794,6 @@ static ssize_t amdgpu_set_pp_od_clk_voltage(struct device *dev,
 		if (ret)
 			return -EINVAL;
 		parameter_size++;
-
-		if (!tmp_str)
-			break;
 
 		while (isspace(*tmp_str))
 			tmp_str++;
@@ -873,11 +869,13 @@ static ssize_t amdgpu_get_pp_od_clk_voltage(struct device *dev,
 	}
 	if (ret == -ENOENT) {
 		size = amdgpu_dpm_print_clock_levels(adev, OD_SCLK, buf);
-		size += amdgpu_dpm_print_clock_levels(adev, OD_MCLK, buf + size);
-		size += amdgpu_dpm_print_clock_levels(adev, OD_VDDC_CURVE, buf + size);
-		size += amdgpu_dpm_print_clock_levels(adev, OD_VDDGFX_OFFSET, buf + size);
-		size += amdgpu_dpm_print_clock_levels(adev, OD_RANGE, buf + size);
-		size += amdgpu_dpm_print_clock_levels(adev, OD_CCLK, buf + size);
+		if (size > 0) {
+			size += amdgpu_dpm_print_clock_levels(adev, OD_MCLK, buf + size);
+			size += amdgpu_dpm_print_clock_levels(adev, OD_VDDC_CURVE, buf + size);
+			size += amdgpu_dpm_print_clock_levels(adev, OD_VDDGFX_OFFSET, buf + size);
+			size += amdgpu_dpm_print_clock_levels(adev, OD_RANGE, buf + size);
+			size += amdgpu_dpm_print_clock_levels(adev, OD_CCLK, buf + size);
+		}
 	}
 
 	if (size == 0)
@@ -1995,7 +1993,6 @@ static int default_attr_update(struct amdgpu_device *adev, struct amdgpu_device_
 		case IP_VERSION(11, 0, 0):
 		case IP_VERSION(11, 0, 1):
 		case IP_VERSION(11, 0, 2):
-		case IP_VERSION(11, 0, 3):
 			*states = ATTR_STATE_SUPPORTED;
 			break;
 		default:
@@ -2077,19 +2074,15 @@ static int amdgpu_device_attr_create(struct amdgpu_device *adev,
 				     uint32_t mask, struct list_head *attr_list)
 {
 	int ret = 0;
+	struct device_attribute *dev_attr = &attr->dev_attr;
+	const char *name = dev_attr->attr.name;
 	enum amdgpu_device_attr_states attr_states = ATTR_STATE_SUPPORTED;
 	struct amdgpu_device_attr_entry *attr_entry;
-	struct device_attribute *dev_attr;
-	const char *name;
 
 	int (*attr_update)(struct amdgpu_device *adev, struct amdgpu_device_attr *attr,
 			   uint32_t mask, enum amdgpu_device_attr_states *states) = default_attr_update;
 
-	if (!attr)
-		return -EINVAL;
-
-	dev_attr = &attr->dev_attr;
-	name = dev_attr->attr.name;
+	BUG_ON(!attr);
 
 	attr_update = attr->attr_update ? attr->attr_update : default_attr_update;
 
@@ -2344,7 +2337,6 @@ static ssize_t amdgpu_hwmon_set_pwm1_enable(struct device *dev,
 {
 	struct amdgpu_device *adev = dev_get_drvdata(dev);
 	int err, ret;
-	u32 pwm_mode;
 	int value;
 
 	if (amdgpu_in_reset(adev))
@@ -2356,22 +2348,13 @@ static ssize_t amdgpu_hwmon_set_pwm1_enable(struct device *dev,
 	if (err)
 		return err;
 
-	if (value == 0)
-		pwm_mode = AMD_FAN_CTRL_NONE;
-	else if (value == 1)
-		pwm_mode = AMD_FAN_CTRL_MANUAL;
-	else if (value == 2)
-		pwm_mode = AMD_FAN_CTRL_AUTO;
-	else
-		return -EINVAL;
-
 	ret = pm_runtime_get_sync(adev_to_drm(adev)->dev);
 	if (ret < 0) {
 		pm_runtime_put_autosuspend(adev_to_drm(adev)->dev);
 		return ret;
 	}
 
-	ret = amdgpu_dpm_set_fan_control_mode(adev, pwm_mode);
+	ret = amdgpu_dpm_set_fan_control_mode(adev, value);
 
 	pm_runtime_mark_last_busy(adev_to_drm(adev)->dev);
 	pm_runtime_put_autosuspend(adev_to_drm(adev)->dev);

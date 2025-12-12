@@ -467,10 +467,8 @@ struct pebs_xmm {
 
 #ifdef CONFIG_X86_LOCAL_APIC
 extern u32 get_ibs_caps(void);
-extern int forward_event_to_ibs(struct perf_event *event);
 #else
 static inline u32 get_ibs_caps(void) { return 0; }
-static inline int forward_event_to_ibs(struct perf_event *event) { return -ENOENT; }
 #endif
 
 #ifdef CONFIG_PERF_EVENTS
@@ -545,12 +543,12 @@ static inline void perf_check_microcode(void) { }
 
 #if defined(CONFIG_PERF_EVENTS) && defined(CONFIG_CPU_SUP_INTEL)
 extern struct perf_guest_switch_msr *perf_guest_get_msrs(int *nr, void *data);
-extern void x86_perf_get_lbr(struct x86_pmu_lbr *lbr);
+extern int x86_perf_get_lbr(struct x86_pmu_lbr *lbr);
 #else
 struct perf_guest_switch_msr *perf_guest_get_msrs(int *nr, void *data);
-static inline void x86_perf_get_lbr(struct x86_pmu_lbr *lbr)
+static inline int x86_perf_get_lbr(struct x86_pmu_lbr *lbr)
 {
-	memset(lbr, 0, sizeof(*lbr));
+	return -1;
 }
 #endif
 

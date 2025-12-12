@@ -817,6 +817,7 @@ static void meson_mmc_start_cmd(struct mmc_host *mmc, struct mmc_command *cmd)
 
 	cmd_cfg |= FIELD_PREP(CMD_CFG_CMD_INDEX_MASK, cmd->opcode);
 	cmd_cfg |= CMD_CFG_OWNER;  /* owned by CPU */
+	cmd_cfg |= CMD_CFG_ERROR; /* stop in case of error */
 
 	meson_mmc_set_response_bits(cmd, &cmd_cfg);
 
@@ -1006,8 +1007,11 @@ static irqreturn_t meson_mmc_irq(int irq, void *dev_id)
 
 		if (data && !cmd->error)
 			data->bytes_xfered = data->blksz * data->blocks;
-
-		return IRQ_WAKE_THREAD;
+		if (meson_mmc_bounce_buf_read(data) ||
+		    meson_mmc_get_next_command(cmd))
+			ret = IRQ_WAKE_THREAD;
+		else
+			ret = IRQ_HANDLED;
 	}
 
 out:
@@ -1018,6 +1022,9 @@ out:
 		start &= ~START_DESC_BUSY;
 		writel(start, host->regs + SD_EMMC_START);
 	}
+
+	if (ret == IRQ_HANDLED)
+		meson_mmc_request_done(host->mmc, cmd->mrq);
 
 	return ret;
 }
@@ -1226,8 +1233,8 @@ static int meson_mmc_probe(struct platform_device *pdev)
 	}
 
 	host->irq = platform_get_irq(pdev, 0);
-	if (host->irq < 0) {
-		ret = host->irq;
+	if (host->irq <= 0) {
+		ret = -EINVAL;
 		goto free_host;
 	}
 

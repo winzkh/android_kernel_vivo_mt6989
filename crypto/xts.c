@@ -396,10 +396,10 @@ static int xts_create(struct crypto_template *tmpl, struct rtattr **tb)
 	 * cipher name.
 	 */
 	if (!strncmp(cipher_name, "ecb(", 4)) {
-		int len;
+		unsigned len;
 
-		len = strscpy(ctx->name, cipher_name + 4, sizeof(ctx->name));
-		if (len < 2)
+		len = strlcpy(ctx->name, cipher_name + 4, sizeof(ctx->name));
+		if (len < 2 || len >= sizeof(ctx->name))
 			goto err_free_inst;
 
 		if (ctx->name[len - 1] != ')')

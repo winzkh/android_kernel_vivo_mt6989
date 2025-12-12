@@ -29,6 +29,14 @@
 
 #include <linux/irq.h>
 #include <linux/uaccess.h>
+#if IS_ENABLED(CONFIG_MTK_SERIAL_8250_DEBUG_LOG)
+#include <linux/sched.h>
+#include <linux/sched/clock.h>
+#endif
+
+#if IS_ENABLED(CONFIG_MTK_SERIAL_8250_DEBUG_LOG)
+u64 THRESHOLD = 200 * 1000 * 1000;
+#endif
 
 /*
  * This is used to lock changes in serial line configuration.
@@ -48,6 +56,8 @@ static struct lock_class_key port_lock_key;
  */
 #define RS485_MAX_RTS_DELAY	100 /* msecs */
 
+static void uart_change_speed(struct tty_struct *tty, struct uart_state *state,
+			      const struct ktermios *old_termios);
 static void uart_wait_until_sent(struct tty_struct *tty, int timeout);
 static void uart_change_pm(struct uart_state *state,
 			   enum uart_pm_state pm_state);
@@ -175,52 +185,6 @@ static void uart_port_dtr_rts(struct uart_port *uport, int raise)
 		uart_clear_mctrl(uport, TIOCM_DTR | TIOCM_RTS);
 }
 
-/* Caller holds port mutex */
-static void uart_change_line_settings(struct tty_struct *tty, struct uart_state *state,
-				      const struct ktermios *old_termios)
-{
-	struct uart_port *uport = uart_port_check(state);
-	struct ktermios *termios;
-	int hw_stopped;
-
-	/*
-	 * If we have no tty, termios, or the port does not exist,
-	 * then we can't set the parameters for this port.
-	 */
-	if (!tty || uport->type == PORT_UNKNOWN)
-		return;
-
-	termios = &tty->termios;
-	uport->ops->set_termios(uport, termios, old_termios);
-
-	/*
-	 * Set modem status enables based on termios cflag
-	 */
-	spin_lock_irq(&uport->lock);
-	if (termios->c_cflag & CRTSCTS)
-		uport->status |= UPSTAT_CTS_ENABLE;
-	else
-		uport->status &= ~UPSTAT_CTS_ENABLE;
-
-	if (termios->c_cflag & CLOCAL)
-		uport->status &= ~UPSTAT_DCD_ENABLE;
-	else
-		uport->status |= UPSTAT_DCD_ENABLE;
-
-	/* reset sw-assisted CTS flow control based on (possibly) new mode */
-	hw_stopped = uport->hw_stopped;
-	uport->hw_stopped = uart_softcts_mode(uport) &&
-			    !(uport->ops->get_mctrl(uport) & TIOCM_CTS);
-	if (uport->hw_stopped) {
-		if (!hw_stopped)
-			uport->ops->stop_tx(uport);
-	} else {
-		if (hw_stopped)
-			__uart_start(tty);
-	}
-	spin_unlock_irq(&uport->lock);
-}
-
 /*
  * Startup the port.  This will be called once per open.  All calls
  * will be serialised by the per-port mutex.
@@ -276,7 +240,7 @@ static int uart_port_startup(struct tty_struct *tty, struct uart_state *state,
 		/*
 		 * Initialise the hardware port settings.
 		 */
-		uart_change_line_settings(tty, state, NULL);
+		uart_change_speed(tty, state, NULL);
 
 		/*
 		 * Setup the RTS and DTR signals once the
@@ -529,6 +493,52 @@ uart_get_divisor(struct uart_port *port, unsigned int baud)
 }
 EXPORT_SYMBOL(uart_get_divisor);
 
+/* Caller holds port mutex */
+static void uart_change_speed(struct tty_struct *tty, struct uart_state *state,
+			      const struct ktermios *old_termios)
+{
+	struct uart_port *uport = uart_port_check(state);
+	struct ktermios *termios;
+	int hw_stopped;
+
+	/*
+	 * If we have no tty, termios, or the port does not exist,
+	 * then we can't set the parameters for this port.
+	 */
+	if (!tty || uport->type == PORT_UNKNOWN)
+		return;
+
+	termios = &tty->termios;
+	uport->ops->set_termios(uport, termios, old_termios);
+
+	/*
+	 * Set modem status enables based on termios cflag
+	 */
+	spin_lock_irq(&uport->lock);
+	if (termios->c_cflag & CRTSCTS)
+		uport->status |= UPSTAT_CTS_ENABLE;
+	else
+		uport->status &= ~UPSTAT_CTS_ENABLE;
+
+	if (termios->c_cflag & CLOCAL)
+		uport->status &= ~UPSTAT_DCD_ENABLE;
+	else
+		uport->status |= UPSTAT_DCD_ENABLE;
+
+	/* reset sw-assisted CTS flow control based on (possibly) new mode */
+	hw_stopped = uport->hw_stopped;
+	uport->hw_stopped = uart_softcts_mode(uport) &&
+				!(uport->ops->get_mctrl(uport) & TIOCM_CTS);
+	if (uport->hw_stopped) {
+		if (!hw_stopped)
+			uport->ops->stop_tx(uport);
+	} else {
+		if (hw_stopped)
+			__uart_start(tty);
+	}
+	spin_unlock_irq(&uport->lock);
+}
+
 static int uart_put_char(struct tty_struct *tty, unsigned char c)
 {
 	struct uart_state *state = tty->driver_data;
@@ -567,6 +577,9 @@ static int uart_write(struct tty_struct *tty,
 	unsigned long flags;
 	int c, ret = 0;
 
+#if IS_ENABLED(CONFIG_MTK_SERIAL_8250_DEBUG_LOG)
+	u64 ts[4] = {0};
+#endif
 	/*
 	 * This means you called this function _after_ the port was
 	 * closed.  No cookie for you.
@@ -575,7 +588,9 @@ static int uart_write(struct tty_struct *tty,
 		WARN_ON(1);
 		return -EL3HLT;
 	}
-
+#if IS_ENABLED(CONFIG_MTK_SERIAL_8250_DEBUG_LOG)
+	ts[0] = sched_clock();
+#endif
 	port = uart_port_lock(state, flags);
 	circ = &state->xmit;
 	if (!circ->buf) {
@@ -595,9 +610,22 @@ static int uart_write(struct tty_struct *tty,
 		count -= c;
 		ret += c;
 	}
-
+#if IS_ENABLED(CONFIG_MTK_SERIAL_8250_DEBUG_LOG)
+	ts[1] = sched_clock();
+#endif
 	__uart_start(tty);
+#if IS_ENABLED(CONFIG_MTK_SERIAL_8250_DEBUG_LOG)
+	ts[2] = sched_clock();
+#endif
 	uart_port_unlock(port, flags);
+#if IS_ENABLED(CONFIG_MTK_SERIAL_8250_DEBUG_LOG)
+	ts[3] = sched_clock();
+	if ((ts[3] - ts[0]) > THRESHOLD) {
+		pr_info("[%s]: ts[3-0][%llu]ns, ts[2-1][%llu]ns, ts[1-0][%llu]ns, ts[3-2][%llu]ns\n"
+			,__func__, ts[3] - ts[0], ts[2] - ts[1], ts[1] - ts[0],
+			ts[3] - ts[2]);
+	}
+#endif
 	return ret;
 }
 
@@ -992,7 +1020,7 @@ static int uart_set_info(struct tty_struct *tty, struct tty_port *port,
 				      current->comm,
 				      tty_name(port->tty));
 			}
-			uart_change_line_settings(tty, state, NULL);
+			uart_change_speed(tty, state, NULL);
 		}
 	} else {
 		retval = uart_startup(tty, state, 1);
@@ -1353,27 +1381,19 @@ static void uart_sanitize_serial_rs485(struct uart_port *port, struct serial_rs4
 		return;
 	}
 
-	rs485->flags &= supported_flags;
-
 	/* Pick sane settings if the user hasn't */
-	if (!(rs485->flags & SER_RS485_RTS_ON_SEND) ==
+	if ((supported_flags & (SER_RS485_RTS_ON_SEND|SER_RS485_RTS_AFTER_SEND)) &&
+	    !(rs485->flags & SER_RS485_RTS_ON_SEND) ==
 	    !(rs485->flags & SER_RS485_RTS_AFTER_SEND)) {
-		if (supported_flags & SER_RS485_RTS_ON_SEND) {
-			rs485->flags |= SER_RS485_RTS_ON_SEND;
-			rs485->flags &= ~SER_RS485_RTS_AFTER_SEND;
-
-			dev_warn_ratelimited(port->dev,
-				"%s (%d): invalid RTS setting, using RTS_ON_SEND instead\n",
-				port->name, port->line);
-		} else {
-			rs485->flags |= SER_RS485_RTS_AFTER_SEND;
-			rs485->flags &= ~SER_RS485_RTS_ON_SEND;
-
-			dev_warn_ratelimited(port->dev,
-				"%s (%d): invalid RTS setting, using RTS_AFTER_SEND instead\n",
-				port->name, port->line);
-		}
+		dev_warn_ratelimited(port->dev,
+			"%s (%d): invalid RTS setting, using RTS_ON_SEND instead\n",
+			port->name, port->line);
+		rs485->flags |= SER_RS485_RTS_ON_SEND;
+		rs485->flags &= ~SER_RS485_RTS_AFTER_SEND;
+		supported_flags |= SER_RS485_RTS_ON_SEND|SER_RS485_RTS_AFTER_SEND;
 	}
+
+	rs485->flags &= supported_flags;
 
 	uart_sanitize_serial_rs485_delays(port, rs485);
 
@@ -1395,18 +1415,12 @@ static void uart_set_rs485_termination(struct uart_port *port,
 static int uart_rs485_config(struct uart_port *port)
 {
 	struct serial_rs485 *rs485 = &port->rs485;
-	unsigned long flags;
 	int ret;
-
-	if (!(rs485->flags & SER_RS485_ENABLED))
-		return 0;
 
 	uart_sanitize_serial_rs485(port, rs485);
 	uart_set_rs485_termination(port, rs485);
 
-	spin_lock_irqsave(&port->lock, flags);
 	ret = port->rs485_config(port, NULL, rs485);
-	spin_unlock_irqrestore(&port->lock, flags);
 	if (ret)
 		memset(rs485, 0, sizeof(*rs485));
 
@@ -1436,7 +1450,7 @@ static int uart_set_rs485_config(struct tty_struct *tty, struct uart_port *port,
 	int ret;
 	unsigned long flags;
 
-	if (!(port->rs485_supported.flags & SER_RS485_ENABLED))
+	if (!port->rs485_config)
 		return -ENOTTY;
 
 	if (copy_from_user(&rs485, rs485_user, sizeof(*rs485_user)))
@@ -1564,7 +1578,7 @@ uart_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned long arg)
 		goto out;
 
 	/* rs485_config requires more locking than others */
-	if (cmd == TIOCSRS485)
+	if (cmd == TIOCGRS485)
 		down_write(&tty->termios_rwsem);
 
 	mutex_lock(&port->mutex);
@@ -1607,7 +1621,7 @@ uart_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned long arg)
 	}
 out_up:
 	mutex_unlock(&port->mutex);
-	if (cmd == TIOCSRS485)
+	if (cmd == TIOCGRS485)
 		up_write(&tty->termios_rwsem);
 out:
 	return ret;
@@ -1668,7 +1682,7 @@ static void uart_set_termios(struct tty_struct *tty,
 		goto out;
 	}
 
-	uart_change_line_settings(tty, state, old_termios);
+	uart_change_speed(tty, state, old_termios);
 	/* reload cflag from termios; port driver may have overridden flags */
 	cflag = tty->termios.c_cflag;
 
@@ -2346,11 +2360,8 @@ int uart_suspend_port(struct uart_driver *drv, struct uart_port *uport)
 	 * able to Re-start_rx later.
 	 */
 	if (!console_suspend_enabled && uart_console(uport)) {
-		if (uport->ops->start_rx) {
-			spin_lock_irq(&uport->lock);
+		if (uport->ops->start_rx)
 			uport->ops->stop_rx(uport);
-			spin_unlock_irq(&uport->lock);
-		}
 		goto unlock;
 	}
 
@@ -2443,11 +2454,8 @@ int uart_resume_port(struct uart_driver *drv, struct uart_port *uport)
 		if (console_suspend_enabled)
 			uart_change_pm(state, UART_PM_STATE_ON);
 		uport->ops->set_termios(uport, &termios, NULL);
-		if (!console_suspend_enabled && uport->ops->start_rx) {
-			spin_lock_irq(&uport->lock);
+		if (!console_suspend_enabled && uport->ops->start_rx)
 			uport->ops->start_rx(uport);
-			spin_unlock_irq(&uport->lock);
-		}
 		if (console_suspend_enabled)
 			console_start(uport->cons);
 	}
@@ -2468,11 +2476,12 @@ int uart_resume_port(struct uart_driver *drv, struct uart_port *uport)
 			ret = ops->startup(uport);
 			if (ret == 0) {
 				if (tty)
-					uart_change_line_settings(tty, state, NULL);
-				uart_rs485_config(uport);
+					uart_change_speed(tty, state, NULL);
 				spin_lock_irq(&uport->lock);
 				if (!(uport->rs485.flags & SER_RS485_ENABLED))
 					ops->set_mctrl(uport, uport->mctrl);
+				else
+					uart_rs485_config(uport);
 				ops->start_tx(uport);
 				spin_unlock_irq(&uport->lock);
 				tty_port_set_initialized(port, 1);
@@ -2561,22 +2570,13 @@ uart_configure_port(struct uart_driver *drv, struct uart_state *state,
 			port->type = PORT_UNKNOWN;
 			flags |= UART_CONFIG_TYPE;
 		}
-		/* Synchronize with possible boot console. */
-		if (uart_console(port))
-			console_lock();
 		port->ops->config_port(port, flags);
-		if (uart_console(port))
-			console_unlock();
 	}
 
 	if (port->type != PORT_UNKNOWN) {
 		unsigned long flags;
 
 		uart_report_port(drv, port);
-
-		/* Synchronize with possible boot console. */
-		if (uart_console(port))
-			console_lock();
 
 		/* Power up port for set_mctrl() */
 		uart_change_pm(state, UART_PM_STATE_ON);
@@ -2590,12 +2590,9 @@ uart_configure_port(struct uart_driver *drv, struct uart_state *state,
 		port->mctrl &= TIOCM_DTR;
 		if (!(port->rs485.flags & SER_RS485_ENABLED))
 			port->ops->set_mctrl(port, port->mctrl);
+		else
+			uart_rs485_config(port);
 		spin_unlock_irqrestore(&port->lock, flags);
-
-		uart_rs485_config(port);
-
-		if (uart_console(port))
-			console_unlock();
 
 		/*
 		 * If this driver supports console, and it hasn't been
@@ -3439,9 +3436,6 @@ int uart_get_rs485_mode(struct uart_port *port)
 	struct device *dev = port->dev;
 	u32 rs485_delay[2];
 	int ret;
-
-	if (!(port->rs485_supported.flags & SER_RS485_ENABLED))
-		return 0;
 
 	ret = device_property_read_u32_array(dev, "rs485-rts-delay",
 					     rs485_delay, 2);

@@ -526,7 +526,7 @@ EXPORT_SYMBOL_GPL(ktime_get_raw_fast_ns);
  * partially updated.  Since the tk->offs_boot update is a rare event, this
  * should be a rare occurrence which postprocessing should be able to handle.
  *
- * The caveats vs. timestamp ordering as documented for ktime_get_mono_fast_ns()
+ * The caveats vs. timestamp ordering as documented for ktime_get_fast_ns()
  * apply as well.
  */
 u64 notrace ktime_get_boot_fast_ns(void)
@@ -576,7 +576,7 @@ static __always_inline u64 __ktime_get_real_fast(struct tk_fast *tkf, u64 *mono)
 /**
  * ktime_get_real_fast_ns: - NMI safe and fast access to clock realtime.
  *
- * See ktime_get_mono_fast_ns() for documentation of the time stamp ordering.
+ * See ktime_get_fast_ns() for documentation of the time stamp ordering.
  */
 u64 ktime_get_real_fast_ns(void)
 {
@@ -1189,15 +1189,13 @@ static int adjust_historical_crosststamp(struct system_time_snapshot *history,
 }
 
 /*
- * timestamp_in_interval - true if ts is chronologically in [start, end]
- *
- * True if ts occurs chronologically at or after start, and before or at end.
+ * cycle_between - true if test occurs chronologically between before and after
  */
-static bool timestamp_in_interval(u64 start, u64 end, u64 ts)
+static bool cycle_between(u64 before, u64 test, u64 after)
 {
-	if (ts >= start && ts <= end)
+	if (test > before && test < after)
 		return true;
-	if (start > end && (ts >= start || ts <= end))
+	if (test < before && before > after)
 		return true;
 	return false;
 }
@@ -1257,7 +1255,7 @@ int get_device_system_crosststamp(int (*get_time_fn)
 		 */
 		now = tk_clock_read(&tk->tkr_mono);
 		interval_start = tk->tkr_mono.cycle_last;
-		if (!timestamp_in_interval(interval_start, now, cycles)) {
+		if (!cycle_between(interval_start, cycles, now)) {
 			clock_was_set_seq = tk->clock_was_set_seq;
 			cs_was_changed_seq = tk->cs_was_changed_seq;
 			cycles = interval_start;
@@ -1270,8 +1268,10 @@ int get_device_system_crosststamp(int (*get_time_fn)
 				      tk_core.timekeeper.offs_real);
 		base_raw = tk->tkr_raw.base;
 
-		nsec_real = timekeeping_cycles_to_ns(&tk->tkr_mono, cycles);
-		nsec_raw = timekeeping_cycles_to_ns(&tk->tkr_raw, cycles);
+		nsec_real = timekeeping_cycles_to_ns(&tk->tkr_mono,
+						     system_counterval.cycles);
+		nsec_raw = timekeeping_cycles_to_ns(&tk->tkr_raw,
+						    system_counterval.cycles);
 	} while (read_seqcount_retry(&tk_core.seq, seq));
 
 	xtstamp->sys_realtime = ktime_add_ns(base_real, nsec_real);
@@ -1286,13 +1286,13 @@ int get_device_system_crosststamp(int (*get_time_fn)
 		bool discontinuity;
 
 		/*
-		 * Check that the counter value is not before the provided
+		 * Check that the counter value occurs after the provided
 		 * history reference and that the history doesn't cross a
 		 * clocksource change
 		 */
 		if (!history_begin ||
-		    !timestamp_in_interval(history_begin->cycles,
-					   cycles, system_counterval.cycles) ||
+		    !cycle_between(history_begin->cycles,
+				   system_counterval.cycles, cycles) ||
 		    history_begin->cs_was_changed_seq != cs_was_changed_seq)
 			return -EINVAL;
 		partial_history_cycles = cycles - system_counterval.cycles;

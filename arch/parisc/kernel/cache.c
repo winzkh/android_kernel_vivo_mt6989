@@ -399,7 +399,6 @@ void flush_dcache_page(struct page *page)
 	unsigned long offset;
 	unsigned long addr, old_addr = 0;
 	unsigned long count = 0;
-	unsigned long flags;
 	pgoff_t pgoff;
 
 	if (mapping && !mapping_mapped(mapping)) {
@@ -421,7 +420,7 @@ void flush_dcache_page(struct page *page)
 	 * to flush one address here for them all to become coherent
 	 * on machines that support equivalent aliasing
 	 */
-	flush_dcache_mmap_lock_irqsave(mapping, flags);
+	flush_dcache_mmap_lock(mapping);
 	vma_interval_tree_foreach(mpnt, &mapping->i_mmap, pgoff, pgoff) {
 		offset = (pgoff - mpnt->vm_pgoff) << PAGE_SHIFT;
 		addr = mpnt->vm_start + offset;
@@ -461,7 +460,7 @@ void flush_dcache_page(struct page *page)
 		}
 		WARN_ON(++count == 4096);
 	}
-	flush_dcache_mmap_unlock_irqrestore(mapping, flags);
+	flush_dcache_mmap_unlock(mapping);
 }
 EXPORT_SYMBOL(flush_dcache_page);
 

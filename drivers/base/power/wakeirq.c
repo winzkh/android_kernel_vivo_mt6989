@@ -314,10 +314,8 @@ void dev_pm_enable_wake_irq_check(struct device *dev,
 	return;
 
 enable:
-	if (!can_change_status || !(wirq->status & WAKE_IRQ_DEDICATED_REVERSE)) {
+	if (!can_change_status || !(wirq->status & WAKE_IRQ_DEDICATED_REVERSE))
 		enable_irq(wirq->irq);
-		wirq->status |= WAKE_IRQ_DEDICATED_ENABLED;
-	}
 }
 
 /**
@@ -338,10 +336,8 @@ void dev_pm_disable_wake_irq_check(struct device *dev, bool cond_disable)
 	if (cond_disable && (wirq->status & WAKE_IRQ_DEDICATED_REVERSE))
 		return;
 
-	if (wirq->status & WAKE_IRQ_DEDICATED_MANAGED) {
-		wirq->status &= ~WAKE_IRQ_DEDICATED_ENABLED;
+	if (wirq->status & WAKE_IRQ_DEDICATED_MANAGED)
 		disable_irq_nosync(wirq->irq);
-	}
 }
 
 /**
@@ -362,10 +358,8 @@ void dev_pm_enable_wake_irq_complete(struct device *dev)
 		return;
 
 	if (wirq->status & WAKE_IRQ_DEDICATED_MANAGED &&
-	    wirq->status & WAKE_IRQ_DEDICATED_REVERSE) {
+	    wirq->status & WAKE_IRQ_DEDICATED_REVERSE)
 		enable_irq(wirq->irq);
-		wirq->status |= WAKE_IRQ_DEDICATED_ENABLED;
-	}
 }
 
 /**
@@ -382,7 +376,7 @@ void dev_pm_arm_wake_irq(struct wake_irq *wirq)
 
 	if (device_may_wakeup(wirq->dev)) {
 		if (wirq->status & WAKE_IRQ_DEDICATED_ALLOCATED &&
-		    !(wirq->status & WAKE_IRQ_DEDICATED_ENABLED))
+		    !pm_runtime_status_suspended(wirq->dev))
 			enable_irq(wirq->irq);
 
 		enable_irq_wake(wirq->irq);
@@ -405,7 +399,7 @@ void dev_pm_disarm_wake_irq(struct wake_irq *wirq)
 		disable_irq_wake(wirq->irq);
 
 		if (wirq->status & WAKE_IRQ_DEDICATED_ALLOCATED &&
-		    !(wirq->status & WAKE_IRQ_DEDICATED_ENABLED))
+		    !pm_runtime_status_suspended(wirq->dev))
 			disable_irq_nosync(wirq->irq);
 	}
 }

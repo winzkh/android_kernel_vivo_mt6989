@@ -278,6 +278,16 @@ err:
 	return ret;
 }
 
+#if IS_ENABLED(CONFIG_MTK_DEBUG_FORK_OOM)
+int show_mem_info(char[] fname, int line_num)
+{
+	pr_info("[FORK_OOM] %s:%d\n", fname, line_num);
+	show_mem(0, NULL);
+
+	return 0;
+}
+#endif
+
 static int alloc_thread_stack_node(struct task_struct *tsk, int node)
 {
 	struct vm_struct *vm;
@@ -302,6 +312,9 @@ static int alloc_thread_stack_node(struct task_struct *tsk, int node)
 
 		if (memcg_charge_kernel_stack(s)) {
 			vfree(s->addr);
+#if IS_ENABLED(CONFIG_MTK_DEBUG_FORK_OOM)
+			show_mem_info(__func__, (int)__LINE__);
+#endif
 			return -ENOMEM;
 		}
 
@@ -320,12 +333,19 @@ static int alloc_thread_stack_node(struct task_struct *tsk, int node)
 				     THREADINFO_GFP & ~__GFP_ACCOUNT,
 				     PAGE_KERNEL,
 				     0, node, __builtin_return_address(0));
-	if (!stack)
+	if (!stack) {
+#if IS_ENABLED(CONFIG_MTK_DEBUG_FORK_OOM)
+		show_mem_info(__func__, (int)__LINE__);
+#endif
 		return -ENOMEM;
+	}
 
 	vm = find_vm_area(stack);
 	if (memcg_charge_kernel_stack(vm)) {
 		vfree(stack);
+#if IS_ENABLED(CONFIG_MTK_DEBUG_FORK_OOM)
+		show_mem_info(__func__, (int)__LINE__);
+#endif
 		return -ENOMEM;
 	}
 	/*
@@ -371,6 +391,10 @@ static int alloc_thread_stack_node(struct task_struct *tsk, int node)
 		tsk->stack = kasan_reset_tag(page_address(page));
 		return 0;
 	}
+
+#if IS_ENABLED(CONFIG_MTK_DEBUG_FORK_OOM)
+	show_mem_info(__func__, (int)__LINE__);
+#endif
 	return -ENOMEM;
 }
 
@@ -403,6 +427,10 @@ static int alloc_thread_stack_node(struct task_struct *tsk, int node)
 	stack = kmem_cache_alloc_node(thread_stack_cache, THREADINFO_GFP, node);
 	stack = kasan_reset_tag(stack);
 	tsk->stack = stack;
+#if IS_ENABLED(CONFIG_MTK_DEBUG_FORK_OOM)
+	if (!stack)
+		show_mem_info(__func__, (int)__LINE__);
+#endif
 	return stack ? 0 : -ENOMEM;
 }
 
@@ -429,6 +457,10 @@ static int alloc_thread_stack_node(struct task_struct *tsk, int node)
 
 	stack = arch_alloc_thread_stack_node(tsk, node);
 	tsk->stack = stack;
+#if IS_ENABLED(CONFIG_MTK_DEBUG_FORK_OOM)
+	if (!stack)
+		show_mem_info(__func__, (int)__LINE__);
+#endif
 	return stack ? 0 : -ENOMEM;
 }
 
@@ -632,7 +664,6 @@ void free_task(struct task_struct *tsk)
 	arch_release_task_struct(tsk);
 	if (tsk->flags & PF_KTHREAD)
 		free_kthread_struct(tsk);
-	bpf_task_storage_free(tsk);
 	free_task_struct(tsk);
 }
 EXPORT_SYMBOL(free_task);
@@ -659,6 +690,7 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 	int retval;
 	unsigned long charge = 0;
 	LIST_HEAD(uf);
+	MA_STATE(old_mas, &oldmm->mm_mt, 0, 0);
 	MA_STATE(mas, &mm->mm_mt, 0, 0);
 
 	uprobe_start_dup_mmap();
@@ -686,23 +718,15 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 		goto out;
 	khugepaged_fork(mm, oldmm);
 
-	/* Use __mt_dup() to efficiently build an identical maple tree. */
-	retval = __mt_dup(&oldmm->mm_mt, &mm->mm_mt, GFP_KERNEL);
-	if (unlikely(retval))
+	retval = mas_expected_entries(&mas, oldmm->map_count);
+	if (retval)
 		goto out;
 
 	mt_clear_in_rcu(mas.tree);
-	mas_for_each(&mas, mpnt, ULONG_MAX) {
+	mas_for_each(&old_mas, mpnt, ULONG_MAX) {
 		struct file *file;
 
-		vma_start_write(mpnt);
 		if (mpnt->vm_flags & VM_DONTCOPY) {
-			__mas_set_range(&mas, mpnt->vm_start, mpnt->vm_end - 1);
-			mas_store_gfp(&mas, NULL, GFP_KERNEL);
-			if (unlikely(mas_is_err(&mas))) {
-				retval = -ENOMEM;
-				goto loop_out;
-			}
 			vm_stat_account(mm, mpnt->vm_flags, -vma_pages(mpnt));
 			continue;
 		}
@@ -764,13 +788,12 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 		if (is_vm_hugetlb_page(tmp))
 			hugetlb_dup_vma_private(tmp);
 
-		/*
-		 * Link the vma into the MT. After using __mt_dup(), memory
-		 * allocation is not necessary here, so it cannot fail.
-		 */
+		/* Link the vma into the MT */
 		mas.index = tmp->vm_start;
 		mas.last = tmp->vm_end - 1;
 		mas_store(&mas, tmp);
+		if (mas_is_err(&mas))
+			goto fail_nomem_mas_store;
 
 		mm->map_count++;
 		if (!(tmp->vm_flags & VM_WIPEONFORK))
@@ -779,28 +802,15 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 		if (tmp->vm_ops && tmp->vm_ops->open)
 			tmp->vm_ops->open(tmp);
 
-		if (retval) {
-			mpnt = mas_find(&mas, ULONG_MAX);
+		if (retval)
 			goto loop_out;
-		}
 	}
 	/* a new mm has just been created */
 	retval = arch_dup_mmap(oldmm, mm);
 loop_out:
 	mas_destroy(&mas);
-	if (!retval) {
+	if (!retval)
 		mt_set_in_rcu(mas.tree);
-	} else if (mpnt) {
-		/*
-		 * The entire maple tree has already been duplicated. If the
-		 * mmap duplication fails, mark the failure point with
-		 * XA_ZERO_ENTRY. In exit_mmap(), if this marker is encountered,
-		 * stop releasing VMAs that have not been duplicated after this
-		 * point.
-		 */
-		mas_set_range(&mas, mpnt->vm_start, mpnt->vm_end - 1);
-		mas_store(&mas, XA_ZERO_ENTRY);
-	}
 out:
 	mmap_write_unlock(mm);
 	flush_tlb_mm(oldmm);
@@ -810,11 +820,16 @@ fail_uprobe_end:
 	uprobe_end_dup_mmap();
 	return retval;
 
+fail_nomem_mas_store:
+	unlink_anon_vmas(tmp);
 fail_nomem_anon_vma_fork:
 	mpol_put(vma_policy(tmp));
 fail_nomem_policy:
 	vm_area_free(tmp);
 fail_nomem:
+#if IS_ENABLED(CONFIG_MTK_DEBUG_FORK_OOM)
+	show_mem_info(__func__, (int)__LINE__);
+#endif
 	retval = -ENOMEM;
 	vm_unacct_memory(charge);
 	goto loop_out;
@@ -823,8 +838,12 @@ fail_nomem:
 static inline int mm_alloc_pgd(struct mm_struct *mm)
 {
 	mm->pgd = pgd_alloc(mm);
-	if (unlikely(!mm->pgd))
+	if (unlikely(!mm->pgd)) {
+#if IS_ENABLED(CONFIG_MTK_DEBUG_FORK_OOM)
+		show_mem_info(__func__, (int)__LINE__);
+#endif
 		return -ENOMEM;
+	}
 	return 0;
 }
 
@@ -855,14 +874,27 @@ static void check_mm(struct mm_struct *mm)
 		long x = atomic_long_read(&mm->rss_stat.count[i]);
 
 		if (unlikely(x))
+#if IS_ENABLED(CONFIG_MTK_PANIC_ON_WARN)
+		{
+#endif
 			pr_alert("BUG: Bad rss-counter state mm:%p type:%s val:%ld\n",
 				 mm, resident_page_types[i], x);
+#if IS_ENABLED(CONFIG_MTK_PANIC_ON_WARN)
+			BUG();
+		}
+#endif
 	}
 
 	if (mm_pgtables_bytes(mm))
+#if IS_ENABLED(CONFIG_MTK_PANIC_ON_WARN)
+	{
+#endif
 		pr_alert("BUG: non-zero pgtables_bytes on freeing mm: %ld\n",
 				mm_pgtables_bytes(mm));
-
+#if IS_ENABLED(CONFIG_MTK_PANIC_ON_WARN)
+		BUG();
+	}
+#endif
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE) && !USE_SPLIT_PMD_PTLOCKS
 	VM_BUG_ON_MM(mm->pmd_huge_pte, mm);
 #endif
@@ -936,6 +968,7 @@ void __put_task_struct(struct task_struct *tsk)
 	cgroup_free(tsk);
 	task_numa_free(tsk, true);
 	security_task_free(tsk);
+	bpf_task_storage_free(tsk);
 	exit_creds(tsk);
 	delayacct_tsk_free(tsk);
 	put_signal_struct(tsk->signal);
@@ -943,14 +976,6 @@ void __put_task_struct(struct task_struct *tsk)
 	free_task(tsk);
 }
 EXPORT_SYMBOL_GPL(__put_task_struct);
-
-void __put_task_struct_rcu_cb(struct rcu_head *rhp)
-{
-	struct task_struct *task = container_of(rhp, struct task_struct, rcu);
-
-	__put_task_struct(task);
-}
-EXPORT_SYMBOL_GPL(__put_task_struct_rcu_cb);
 
 void __init __weak arch_task_cache_init(void) { }
 
@@ -1688,8 +1713,12 @@ static int copy_mm(unsigned long clone_flags, struct task_struct *tsk)
 		mm = oldmm;
 	} else {
 		mm = dup_mm(tsk, current->mm);
-		if (!mm)
+		if (!mm) {
+#if IS_ENABLED(CONFIG_MTK_DEBUG_FORK_OOM)
+			show_mem_info(__func__, (int)__LINE__);
+#endif
 			return -ENOMEM;
+		}
 	}
 
 	tsk->mm = mm;
@@ -1712,8 +1741,12 @@ static int copy_fs(unsigned long clone_flags, struct task_struct *tsk)
 		return 0;
 	}
 	tsk->fs = copy_fs_struct(fs);
-	if (!tsk->fs)
+	if (!tsk->fs) {
+#if IS_ENABLED(CONFIG_MTK_DEBUG_FORK_OOM)
+		show_mem_info(__func__, (int)__LINE__);
+#endif
 		return -ENOMEM;
+	}
 	return 0;
 }
 
@@ -1754,8 +1787,12 @@ static int copy_sighand(unsigned long clone_flags, struct task_struct *tsk)
 	}
 	sig = kmem_cache_alloc(sighand_cachep, GFP_KERNEL);
 	RCU_INIT_POINTER(tsk->sighand, sig);
-	if (!sig)
+	if (!sig) {
+#if IS_ENABLED(CONFIG_MTK_DEBUG_FORK_OOM)
+		show_mem_info(__func__, (int)__LINE__);
+#endif
 		return -ENOMEM;
+	}
 
 	refcount_set(&sig->count, 1);
 	spin_lock_irq(&current->sighand->siglock);
@@ -1802,8 +1839,12 @@ static int copy_signal(unsigned long clone_flags, struct task_struct *tsk)
 
 	sig = kmem_cache_zalloc(signal_cachep, GFP_KERNEL);
 	tsk->signal = sig;
-	if (!sig)
+	if (!sig) {
+#if IS_ENABLED(CONFIG_MTK_DEBUG_FORK_OOM)
+		show_mem_info(__func__, (int)__LINE__);
+#endif
 		return -ENOMEM;
+	}
 
 	sig->nr_threads = 1;
 	sig->quick_threads = 1;
@@ -2195,6 +2236,9 @@ static __latent_entropy struct task_struct *copy_process(
 	if (task_sigpending(current))
 		goto fork_out;
 
+#if IS_ENABLED(CONFIG_MTK_DEBUG_FORK_OOM)
+	show_mem_info(__func__, (int)__LINE__);
+#endif
 	retval = -ENOMEM;
 	p = dup_task_struct(current, node);
 	if (!p)
@@ -2529,6 +2573,9 @@ static __latent_entropy struct task_struct *copy_process(
 
 	/* Don't start children in a dying pid namespace */
 	if (unlikely(!(ns_of_pid(pid)->pid_allocated & PIDNS_ADDING))) {
+#if IS_ENABLED(CONFIG_MTK_DEBUG_FORK_OOM)
+		show_mem_info(__func__, (int)__LINE__);
+#endif
 		retval = -ENOMEM;
 		goto bad_fork_cancel_cgroup;
 	}
@@ -2590,7 +2637,6 @@ static __latent_entropy struct task_struct *copy_process(
 		attach_pid(p, PIDTYPE_PID);
 		nr_threads++;
 	}
-	trace_android_vh_copy_process(current, nr_threads, current->signal->nr_threads);
 	total_forks++;
 	hlist_del_init(&delayed.node);
 	spin_unlock(&current->sighand->siglock);
@@ -2712,6 +2758,11 @@ struct task_struct * __init fork_idle(int cpu)
 	return task;
 }
 
+struct mm_struct *copy_init_mm(void)
+{
+	return dup_mm(NULL, &init_mm);
+}
+
 /*
  * This is like kernel_clone(), but shaved down and tailored to just
  * creating io_uring workers. It returns a created task, or an error pointer.
@@ -2796,6 +2847,9 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 	 * might get invalid after that point, if the thread exits quickly.
 	 */
 	trace_sched_process_fork(current, p);
+#if IS_ENABLED(CONFIG_MTK_MBRAINK_EXPORT_DEPENDED)
+	trace_android_vh_do_fork(p);
+#endif
 
 	pid = get_task_pid(p, PIDTYPE_PID);
 	nr = pid_vnr(pid);
@@ -3132,27 +3186,10 @@ static void sighand_ctor(void *data)
 	init_waitqueue_head(&sighand->signalfd_wqh);
 }
 
-void __init mm_cache_init(void)
+void __init proc_caches_init(void)
 {
 	unsigned int mm_size;
 
-	/*
-	 * The mm_cpumask is located at the end of mm_struct, and is
-	 * dynamically sized based on the maximum CPU number this system
-	 * can have, taking hotplug into account (nr_cpu_ids).
-	 */
-	mm_size = sizeof(struct mm_struct) + cpumask_size();
-
-	mm_cachep = kmem_cache_create_usercopy("mm_struct",
-			mm_size, ARCH_MIN_MMSTRUCT_ALIGN,
-			SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_ACCOUNT,
-			offsetof(struct mm_struct, saved_auxv),
-			sizeof_field(struct mm_struct, saved_auxv),
-			NULL);
-}
-
-void __init proc_caches_init(void)
-{
 	sighand_cachep = kmem_cache_create("sighand_cache",
 			sizeof(struct sighand_struct), 0,
 			SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_TYPESAFE_BY_RCU|
@@ -3170,6 +3207,19 @@ void __init proc_caches_init(void)
 			SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_ACCOUNT,
 			NULL);
 
+	/*
+	 * The mm_cpumask is located at the end of mm_struct, and is
+	 * dynamically sized based on the maximum CPU number this system
+	 * can have, taking hotplug into account (nr_cpu_ids).
+	 */
+	mm_size = sizeof(struct mm_struct) + cpumask_size();
+
+	mm_cachep = kmem_cache_create_usercopy("mm_struct",
+			mm_size, ARCH_MIN_MMSTRUCT_ALIGN,
+			SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_ACCOUNT,
+			offsetof(struct mm_struct, saved_auxv),
+			sizeof_field(struct mm_struct, saved_auxv),
+			NULL);
 	vm_area_cachep = KMEM_CACHE(vm_area_struct, SLAB_PANIC|SLAB_ACCOUNT);
 #ifdef CONFIG_PER_VMA_LOCK
 	vma_lock_cachep = KMEM_CACHE(vma_lock, SLAB_PANIC|SLAB_ACCOUNT);
@@ -3226,8 +3276,12 @@ static int unshare_fs(unsigned long unshare_flags, struct fs_struct **new_fsp)
 		return 0;
 
 	*new_fsp = copy_fs_struct(fs);
-	if (!*new_fsp)
+	if (!*new_fsp) {
+#if IS_ENABLED(CONFIG_MTK_DEBUG_FORK_OOM)
+		show_mem_info(__func__, (int)__LINE__);
+#endif
 		return -ENOMEM;
+	}
 
 	return 0;
 }

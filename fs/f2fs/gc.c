@@ -1405,6 +1405,8 @@ static int move_data_block(struct inode *inode, block_t bidx,
 
 	f2fs_update_data_blkaddr(&dn, newaddr);
 	set_inode_flag(inode, FI_APPEND_WRITE);
+	if (page->index == 0)
+		set_inode_flag(inode, FI_FIRST_BLOCK_WRITTEN);
 put_page_out:
 	f2fs_put_page(fio.encrypted_page, 1);
 recover_block:
@@ -2097,9 +2099,8 @@ static void update_fs_metadata(struct f2fs_sb_info *sbi, int secs)
 	}
 }
 
-int f2fs_resize_fs(struct file *filp, __u64 block_count)
+int f2fs_resize_fs(struct f2fs_sb_info *sbi, __u64 block_count)
 {
-	struct f2fs_sb_info *sbi = F2FS_I_SB(file_inode(filp));
 	__u64 old_block_count, shrunk_blocks;
 	struct cp_control cpc = { CP_RESIZE, 0, 0, 0 };
 	unsigned int secs;
@@ -2137,18 +2138,12 @@ int f2fs_resize_fs(struct file *filp, __u64 block_count)
 		return -EINVAL;
 	}
 
-	err = mnt_want_write_file(filp);
-	if (err)
-		return err;
-
 	shrunk_blocks = old_block_count - block_count;
 	secs = div_u64(shrunk_blocks, BLKS_PER_SEC(sbi));
 
 	/* stop other GC */
-	if (!f2fs_down_write_trylock(&sbi->gc_lock)) {
-		err = -EAGAIN;
-		goto out_drop_write;
-	}
+	if (!f2fs_down_write_trylock(&sbi->gc_lock))
+		return -EAGAIN;
 
 	/* stop CP to protect MAIN_SEC in free_segment_range */
 	f2fs_lock_op(sbi);
@@ -2168,20 +2163,10 @@ int f2fs_resize_fs(struct file *filp, __u64 block_count)
 out_unlock:
 	f2fs_unlock_op(sbi);
 	f2fs_up_write(&sbi->gc_lock);
-out_drop_write:
-	mnt_drop_write_file(filp);
 	if (err)
 		return err;
 
-	err = freeze_super(sbi->sb);
-	if (err)
-		return err;
-
-	if (f2fs_readonly(sbi->sb)) {
-		thaw_super(sbi->sb);
-		return -EROFS;
-	}
-
+	freeze_super(sbi->sb);
 	f2fs_down_write(&sbi->gc_lock);
 	f2fs_down_write(&sbi->cp_global_sem);
 

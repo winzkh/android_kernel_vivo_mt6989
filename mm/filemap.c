@@ -50,21 +50,12 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/filemap.h>
 
-#undef CREATE_TRACE_POINTS
-#include <trace/hooks/mm.h>
-
 /*
  * FIXME: remove all knowledge of the buffer layer from the core VM
  */
 #include <linux/buffer_head.h> /* for try_to_free_buffers */
 
 #include <asm/mman.h>
-
-void _trace_android_rvh_mapping_shrinkable(bool *shrinkable)
-{
-	trace_android_rvh_mapping_shrinkable(shrinkable);
-}
-EXPORT_SYMBOL_GPL(_trace_android_rvh_mapping_shrinkable);
 
 /*
  * Shared mappings implemented 30.11.1994. It's not fully working yet,
@@ -1716,47 +1707,46 @@ static int __folio_lock_async(struct folio *folio, struct wait_page_queue *wait)
 
 /*
  * Return values:
- * 0 - folio is locked.
- * non-zero - folio is not locked.
- *     mmap_lock or per-VMA lock has been released (mmap_read_unlock() or
- *     vma_end_read()), unless flags had both FAULT_FLAG_ALLOW_RETRY and
- *     FAULT_FLAG_RETRY_NOWAIT set, in which case the lock is still held.
+ * true - folio is locked; mmap_lock is still held.
+ * false - folio is not locked.
+ *     mmap_lock has been released (mmap_read_unlock(), unless flags had both
+ *     FAULT_FLAG_ALLOW_RETRY and FAULT_FLAG_RETRY_NOWAIT set, in
+ *     which case mmap_lock is still held.
  *
- * If neither ALLOW_RETRY nor KILLABLE are set, will always return 0
- * with the folio locked and the mmap_lock/per-VMA lock is left unperturbed.
+ * If neither ALLOW_RETRY nor KILLABLE are set, will always return true
+ * with the folio locked and the mmap_lock unperturbed.
  */
-vm_fault_t __folio_lock_or_retry(struct folio *folio, struct vm_fault *vmf)
+bool __folio_lock_or_retry(struct folio *folio, struct mm_struct *mm,
+			 unsigned int flags)
 {
-	unsigned int flags = vmf->flags;
-
 	if (fault_flag_allow_retry_first(flags)) {
 		/*
-		 * CAUTION! In this case, mmap_lock/per-VMA lock is not
-		 * released even though returning VM_FAULT_RETRY.
+		 * CAUTION! In this case, mmap_lock is not released
+		 * even though return 0.
 		 */
 		if (flags & FAULT_FLAG_RETRY_NOWAIT)
-			return VM_FAULT_RETRY;
+			return false;
 
-		release_fault_lock(vmf);
+		mmap_read_unlock(mm);
 		if (flags & FAULT_FLAG_KILLABLE)
 			folio_wait_locked_killable(folio);
 		else
 			folio_wait_locked(folio);
-		return VM_FAULT_RETRY;
+		return false;
 	}
 	if (flags & FAULT_FLAG_KILLABLE) {
 		bool ret;
 
 		ret = __folio_lock_killable(folio);
 		if (ret) {
-			release_fault_lock(vmf);
-			return VM_FAULT_RETRY;
+			mmap_read_unlock(mm);
+			return false;
 		}
 	} else {
 		__folio_lock(folio);
 	}
 
-	return 0;
+	return true;
 }
 
 /**
@@ -1939,9 +1929,6 @@ repeat:
 			return folio;
 		folio = NULL;
 	}
-
-	trace_android_vh_filemap_get_folio(mapping, index, fgp_flags,
-					gfp, folio);
 	if (!folio)
 		goto no_page;
 
@@ -2285,60 +2272,6 @@ out:
 	return folio_batch_count(fbatch);
 }
 EXPORT_SYMBOL(filemap_get_folios_contig);
-
-/**
- * filemap_get_folios_tag - Get a batch of folios matching @tag
- * @mapping:    The address_space to search
- * @start:      The starting page index
- * @end:        The final page index (inclusive)
- * @tag:        The tag index
- * @fbatch:     The batch to fill
- *
- * Same as filemap_get_folios(), but only returning folios tagged with @tag.
- *
- * Return: The number of folios found.
- * Also update @start to index the next folio for traversal.
- */
-unsigned filemap_get_folios_tag(struct address_space *mapping, pgoff_t *start,
-			pgoff_t end, xa_mark_t tag, struct folio_batch *fbatch)
-{
-	XA_STATE(xas, &mapping->i_pages, *start);
-	struct folio *folio;
-
-	rcu_read_lock();
-	while ((folio = find_get_entry(&xas, end, tag)) != NULL) {
-		/*
-		 * Shadow entries should never be tagged, but this iteration
-		 * is lockless so there is a window for page reclaim to evict
-		 * a page we saw tagged. Skip over it.
-		 */
-		if (xa_is_value(folio))
-			continue;
-		if (!folio_batch_add(fbatch, folio)) {
-			unsigned long nr = folio_nr_pages(folio);
-
-			if (folio_test_hugetlb(folio))
-				nr = 1;
-			*start = folio->index + nr;
-			goto out;
-		}
-	}
-	/*
-	 * We come here when there is no page beyond @end. We take care to not
-	 * overflow the index @start as it confuses some of the callers. This
-	 * breaks the iteration when there is a page at index -1 but that is
-	 * already broke anyway.
-	 */
-	if (end == (pgoff_t)-1)
-		*start = (pgoff_t)-1;
-	else
-		*start = end + 1;
-out:
-	rcu_read_unlock();
-
-	return folio_batch_count(fbatch);
-}
-EXPORT_SYMBOL(filemap_get_folios_tag);
 
 /**
  * find_get_pages_range_tag - Find and return head pages matching @tag.
@@ -2769,15 +2702,6 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 		end_offset = min_t(loff_t, isize, iocb->ki_pos + iter->count);
 
 		/*
-		 * Pairs with a barrier in
-		 * block_write_end()->mark_buffer_dirty() or other page
-		 * dirtying routines like iomap_write_end() to ensure
-		 * changes to page contents are visible before we see
-		 * increased inode size.
-		 */
-		smp_rmb();
-
-		/*
 		 * Once we start copying data, we don't want to be touching any
 		 * cachelines that might be contended:
 		 */
@@ -3036,7 +2960,7 @@ static int lock_folio_maybe_drop_mmap(struct vm_fault *vmf, struct folio *folio,
 
 	/*
 	 * NOTE! This will make us return with VM_FAULT_RETRY, but with
-	 * the fault lock still held. That's how FAULT_FLAG_RETRY_NOWAIT
+	 * the mmap_lock still held. That's how FAULT_FLAG_RETRY_NOWAIT
 	 * is supposed to work. We have way too many special cases..
 	 */
 	if (vmf->flags & FAULT_FLAG_RETRY_NOWAIT)
@@ -3046,14 +2970,13 @@ static int lock_folio_maybe_drop_mmap(struct vm_fault *vmf, struct folio *folio,
 	if (vmf->flags & FAULT_FLAG_KILLABLE) {
 		if (__folio_lock_killable(folio)) {
 			/*
-			 * We didn't have the right flags to drop the
-			 * fault lock, but all fault_handlers only check
-			 * for fatal signals if we return VM_FAULT_RETRY,
-			 * so we need to drop the fault lock here and
-			 * return 0 if we don't have a fpin.
+			 * We didn't have the right flags to drop the mmap_lock,
+			 * but all fault_handlers only check for fatal signals
+			 * if we return VM_FAULT_RETRY, so we need to drop the
+			 * mmap_lock here and return 0 if we don't have a fpin.
 			 */
 			if (*fpin == NULL)
-				release_fault_lock(vmf);
+				mmap_read_unlock(vmf->vma->vm_mm);
 			return 0;
 		}
 	} else
@@ -3128,8 +3051,6 @@ static struct file *do_sync_mmap_readahead(struct vm_fault *vmf)
 	ra->start = max_t(long, 0, vmf->pgoff - ra->ra_pages / 2);
 	ra->size = ra->ra_pages;
 	ra->async_size = ra->ra_pages / 4;
-	trace_android_vh_tune_mmap_readaround(ra->ra_pages, vmf->pgoff,
-			&ra->start, &ra->size, &ra->async_size);
 	ractl._index = ra->start;
 	page_cache_ra_order(&ractl, ra, 0);
 	return fpin;
@@ -3355,7 +3276,7 @@ static bool filemap_map_pmd(struct vm_fault *vmf, struct page *page)
 		}
 	}
 
-	if (pmd_none(*vmf->pmd) && vmf->prealloc_pte)
+	if (pmd_none(*vmf->pmd))
 		pmd_install(mm, vmf->pmd, &vmf->prealloc_pte);
 
 	/* See comment in handle_pte_fault() */
@@ -4032,8 +3953,6 @@ bool filemap_release_folio(struct folio *folio, gfp_t gfp)
 	struct address_space * const mapping = folio->mapping;
 
 	BUG_ON(!folio_test_locked(folio));
-	if (!folio_needs_release(folio))
-		return true;
 	if (folio_test_writeback(folio))
 		return false;
 

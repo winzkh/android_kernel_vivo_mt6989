@@ -291,16 +291,12 @@ static void __init ms_hyperv_init_platform(void)
 	 * To mirror what Windows does we should extract CPU management
 	 * features and use the ReservedIdentityBit to detect if Linux is the
 	 * root partition. But that requires negotiating CPU management
-	 * interface (a process to be finalized). For now, use the privilege
-	 * flag as the indicator for running as root.
+	 * interface (a process to be finalized).
 	 *
-	 * Hyper-V should never specify running as root and as a Confidential
-	 * VM. But to protect against a compromised/malicious Hyper-V trying
-	 * to exploit root behavior to expose Confidential VM memory, ignore
-	 * the root partition setting if also a Confidential VM.
+	 * For now, use the privilege flag as the indicator for running as
+	 * root.
 	 */
-	if ((ms_hyperv.priv_high & HV_CPU_MANAGEMENT) &&
-	    !(ms_hyperv.priv_high & HV_ISOLATION)) {
+	if (cpuid_ebx(HYPERV_CPUID_FEATURES) & HV_CPU_MANAGEMENT) {
 		hv_root_partition = true;
 		pr_info("Hyper-V: running as root partition\n");
 	}
@@ -344,7 +340,7 @@ static void __init ms_hyperv_init_platform(void)
 		/* Isolation VMs are unenlightened SEV-based VMs, thus this check: */
 		if (IS_ENABLED(CONFIG_AMD_MEM_ENCRYPT)) {
 			if (hv_get_isolation_type() != HV_ISOLATION_TYPE_NONE)
-				cc_vendor = CC_VENDOR_HYPERV;
+				cc_set_vendor(CC_VENDOR_HYPERV);
 		}
 	}
 

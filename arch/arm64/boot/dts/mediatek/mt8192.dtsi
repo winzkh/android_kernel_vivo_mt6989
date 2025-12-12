@@ -64,8 +64,7 @@
 			clock-frequency = <1701000000>;
 			cpu-idle-states = <&cpu_sleep_l &cluster_sleep_l>;
 			next-level-cache = <&l2_0>;
-			performance-domains = <&performance 0>;
-			capacity-dmips-mhz = <427>;
+			capacity-dmips-mhz = <530>;
 		};
 
 		cpu1: cpu@100 {
@@ -76,8 +75,7 @@
 			clock-frequency = <1701000000>;
 			cpu-idle-states = <&cpu_sleep_l &cluster_sleep_l>;
 			next-level-cache = <&l2_0>;
-			performance-domains = <&performance 0>;
-			capacity-dmips-mhz = <427>;
+			capacity-dmips-mhz = <530>;
 		};
 
 		cpu2: cpu@200 {
@@ -88,8 +86,7 @@
 			clock-frequency = <1701000000>;
 			cpu-idle-states = <&cpu_sleep_l &cluster_sleep_l>;
 			next-level-cache = <&l2_0>;
-			performance-domains = <&performance 0>;
-			capacity-dmips-mhz = <427>;
+			capacity-dmips-mhz = <530>;
 		};
 
 		cpu3: cpu@300 {
@@ -100,8 +97,7 @@
 			clock-frequency = <1701000000>;
 			cpu-idle-states = <&cpu_sleep_l &cluster_sleep_l>;
 			next-level-cache = <&l2_0>;
-			performance-domains = <&performance 0>;
-			capacity-dmips-mhz = <427>;
+			capacity-dmips-mhz = <530>;
 		};
 
 		cpu4: cpu@400 {
@@ -112,7 +108,6 @@
 			clock-frequency = <2171000000>;
 			cpu-idle-states = <&cpu_sleep_b &cluster_sleep_b>;
 			next-level-cache = <&l2_1>;
-			performance-domains = <&performance 1>;
 			capacity-dmips-mhz = <1024>;
 		};
 
@@ -124,7 +119,6 @@
 			clock-frequency = <2171000000>;
 			cpu-idle-states = <&cpu_sleep_b &cluster_sleep_b>;
 			next-level-cache = <&l2_1>;
-			performance-domains = <&performance 1>;
 			capacity-dmips-mhz = <1024>;
 		};
 
@@ -136,7 +130,6 @@
 			clock-frequency = <2171000000>;
 			cpu-idle-states = <&cpu_sleep_b &cluster_sleep_b>;
 			next-level-cache = <&l2_1>;
-			performance-domains = <&performance 1>;
 			capacity-dmips-mhz = <1024>;
 		};
 
@@ -148,7 +141,6 @@
 			clock-frequency = <2171000000>;
 			cpu-idle-states = <&cpu_sleep_b &cluster_sleep_b>;
 			next-level-cache = <&l2_1>;
-			performance-domains = <&performance 1>;
 			capacity-dmips-mhz = <1024>;
 		};
 
@@ -264,12 +256,6 @@
 		#size-cells = <2>;
 		compatible = "simple-bus";
 		ranges;
-
-		performance: performance-controller@11bc10 {
-			compatible = "mediatek,cpufreq-hw";
-			reg = <0 0x0011bc10 0 0x120>, <0 0x0011bd30 0 0x120>;
-			#performance-domain-cells = <1>;
-		};
 
 		gic: interrupt-controller@c000000 {
 			compatible = "arm,gic-v3";
@@ -1539,7 +1525,7 @@
 			mediatek,scp = <&scp>;
 			power-domains = <&spm MT8192_POWER_DOMAIN_VENC>;
 			clocks = <&vencsys CLK_VENC_SET1_VENC>;
-			clock-names = "venc_sel";
+			clock-names = "venc-set1";
 			assigned-clocks = <&topckgen CLK_TOP_VENC_SEL>;
 			assigned-clock-parents = <&topckgen CLK_TOP_UNIVPLL_D4>;
 		};

@@ -850,7 +850,7 @@ static void xfrm_policy_inexact_list_reinsert(struct net *net,
 		struct hlist_node *newpos = NULL;
 		bool matches_s, matches_d;
 
-		if (policy->walk.dead || !policy->bydst_reinsert)
+		if (!policy->bydst_reinsert)
 			continue;
 
 		WARN_ON_ONCE(policy->family != family);
@@ -1255,11 +1255,8 @@ static void xfrm_hash_rebuild(struct work_struct *work)
 		struct xfrm_pol_inexact_bin *bin;
 		u8 dbits, sbits;
 
-		if (policy->walk.dead)
-			continue;
-
 		dir = xfrm_policy_id2dir(policy->index);
-		if (dir >= XFRM_POLICY_MAX)
+		if (policy->walk.dead || dir >= XFRM_POLICY_MAX)
 			continue;
 
 		if ((dir & XFRM_POLICY_MASK) == XFRM_POLICY_OUT) {
@@ -1793,11 +1790,9 @@ int xfrm_policy_flush(struct net *net, u8 type, bool task_valid)
 
 again:
 	list_for_each_entry(pol, &net->xfrm.policy_all, walk.all) {
-		if (pol->walk.dead)
-			continue;
-
 		dir = xfrm_policy_id2dir(pol->index);
-		if (dir >= XFRM_POLICY_MAX ||
+		if (pol->walk.dead ||
+		    dir >= XFRM_POLICY_MAX ||
 		    pol->type != type)
 			continue;
 
@@ -2179,7 +2174,7 @@ static struct xfrm_policy *xfrm_sk_policy_lookup(const struct sock *sk, int dir,
 
 		match = xfrm_selector_match(&pol->selector, fl, family);
 		if (match) {
-			if ((READ_ONCE(sk->sk_mark) & pol->mark.m) != pol->mark.v ||
+			if ((sk->sk_mark & pol->mark.m) != pol->mark.v ||
 			    pol->if_id != if_id) {
 				pol = NULL;
 				goto out;
@@ -3143,7 +3138,7 @@ no_transform:
 	}
 
 	for (i = 0; i < num_pols; i++)
-		WRITE_ONCE(pols[i]->curlft.use_time, ktime_get_real_seconds());
+		pols[i]->curlft.use_time = ktime_get_real_seconds();
 
 	if (num_xfrms < 0) {
 		/* Prohibit the flow */
@@ -3650,6 +3645,12 @@ int __xfrm_policy_check(struct sock *sk, int dir, struct sk_buff *skb,
 		}
 		xfrm_nr = ti;
 
+		if (net->xfrm.policy_default[dir] == XFRM_USERPOLICY_BLOCK &&
+		    !xfrm_nr) {
+			XFRM_INC_STATS(net, LINUX_MIB_XFRMINNOSTATES);
+			goto reject;
+		}
+
 		if (npols > 1) {
 			xfrm_tmpl_sort(stp, tpp, xfrm_nr, family);
 			tpp = stp;
@@ -3774,10 +3775,15 @@ static void xfrm_link_failure(struct sk_buff *skb)
 	/* Impossible. Such dst must be popped before reaches point of failure. */
 }
 
-static void xfrm_negative_advice(struct sock *sk, struct dst_entry *dst)
+static struct dst_entry *xfrm_negative_advice(struct dst_entry *dst)
 {
-	if (dst->obsolete)
-		sk_dst_reset(sk);
+	if (dst) {
+		if (dst->obsolete) {
+			dst_release(dst);
+			dst = NULL;
+		}
+	}
+	return dst;
 }
 
 static void xfrm_init_pmtu(struct xfrm_dst **bundle, int nr)
@@ -3945,7 +3951,7 @@ int xfrm_policy_register_afinfo(const struct xfrm_policy_afinfo *afinfo, int fam
 		if (likely(dst_ops->mtu == NULL))
 			dst_ops->mtu = xfrm_mtu;
 		if (likely(dst_ops->negative_advice == NULL))
-			dst_ops->negative_advice = (void *)xfrm_negative_advice;
+			dst_ops->negative_advice = xfrm_negative_advice;
 		if (likely(dst_ops->link_failure == NULL))
 			dst_ops->link_failure = xfrm_link_failure;
 		if (likely(dst_ops->neigh_lookup == NULL))

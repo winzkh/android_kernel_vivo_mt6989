@@ -190,7 +190,7 @@ static int persistent_ram_init_ecc(struct persistent_ram_zone *prz,
 {
 	int numerr;
 	struct persistent_ram_buffer *buffer = prz->buffer;
-	size_t ecc_blocks;
+	int ecc_blocks;
 	size_t ecc_total;
 
 	if (!ecc_info || !ecc_info->ecc_size)
@@ -518,7 +518,14 @@ static int persistent_ram_post_init(struct persistent_ram_zone *prz, u32 sig,
 	sig ^= PERSISTENT_RAM_SIG;
 
 	if (prz->buffer->sig == sig) {
-		if (buffer_size(prz) == 0 && buffer_start(prz) == 0) {
+		if (buffer_size(prz) == 0) {
+#if IS_ENABLED(CONFIG_MTK_PRINTK_DEBUG)
+			if (buffer_start(prz)) {
+				pr_info(" buffer:sig:0x%x,start:0x%lx\n",
+						prz->buffer->sig, buffer_start(prz));
+				persistent_ram_zap(prz);
+			}
+#endif
 			pr_debug("found existing empty buffer\n");
 			return 0;
 		}
@@ -591,8 +598,6 @@ struct persistent_ram_zone *persistent_ram_new(phys_addr_t start, size_t size,
 	raw_spin_lock_init(&prz->buffer_lock);
 	prz->flags = flags;
 	prz->label = kstrdup(label, GFP_KERNEL);
-	if (!prz->label)
-		goto err;
 
 	ret = persistent_ram_buffer_map(start, size, prz, memtype);
 	if (ret)

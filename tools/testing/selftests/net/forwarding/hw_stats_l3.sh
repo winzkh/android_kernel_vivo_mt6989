@@ -84,9 +84,8 @@ h2_destroy()
 
 router_rp1_200_create()
 {
-	ip link add name $rp1.200 link $rp1 type vlan id 200
-	ip link set dev $rp1.200 addrgenmode eui64
-	ip link set dev $rp1.200 up
+	ip link add name $rp1.200 up \
+		link $rp1 addrgenmode eui64 type vlan id 200
 	ip address add dev $rp1.200 192.0.2.2/28
 	ip address add dev $rp1.200 2001:db8:1::2/64
 	ip stats set dev $rp1.200 l3_stats on
@@ -257,11 +256,9 @@ reapply_config()
 
 	router_rp1_200_destroy
 
-	ip link add name $rp1.200 link $rp1 type vlan id 200
-	ip link set dev $rp1.200 addrgenmode none
+	ip link add name $rp1.200 link $rp1 addrgenmode none type vlan id 200
 	ip stats set dev $rp1.200 l3_stats on
-	ip link set dev $rp1.200 addrgenmode eui64
-	ip link set dev $rp1.200 up
+	ip link set dev $rp1.200 up addrgenmode eui64
 	ip address add dev $rp1.200 192.0.2.2/28
 	ip address add dev $rp1.200 2001:db8:1::2/64
 }

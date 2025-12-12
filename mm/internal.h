@@ -164,17 +164,6 @@ static inline void set_page_refcounted(struct page *page)
 	set_page_count(page, 1);
 }
 
-/*
- * Return true if a folio needs ->release_folio() calling upon it.
- */
-static inline bool folio_needs_release(struct folio *folio)
-{
-	struct address_space *mapping = folio_mapping(folio);
-
-	return folio_has_private(folio) ||
-		(mapping && mapping_release_always(mapping));
-}
-
 extern unsigned long highest_memmap_pfn;
 
 /*
@@ -455,9 +444,7 @@ isolate_migratepages_range(struct compact_control *cc,
 			   unsigned long low_pfn, unsigned long end_pfn);
 
 int __alloc_contig_migrate_range(struct compact_control *cc,
-					unsigned long start, unsigned long end,
-					int migratetype);
-
+					unsigned long start, unsigned long end);
 #endif
 int find_suitable_fallback(struct free_area *area, unsigned int order,
 			int migratetype, bool only_stealable, bool *can_steal);
@@ -632,7 +619,7 @@ static inline struct file *maybe_unlock_mmap_for_io(struct vm_fault *vmf,
 	if (fault_flag_allow_retry_first(flags) &&
 	    !(flags & FAULT_FLAG_RETRY_NOWAIT)) {
 		fpin = get_file(vmf->vma->vm_file);
-		release_fault_lock(vmf);
+		mmap_read_unlock(vmf->vma->vm_mm);
 	}
 	return fpin;
 }

@@ -526,8 +526,6 @@ void amdgpu_gmc_tmz_set(struct amdgpu_device *adev)
 	case IP_VERSION(9, 3, 0):
 	/* GC 10.3.7 */
 	case IP_VERSION(10, 3, 7):
-	/* GC 11.0.1 */
-	case IP_VERSION(11, 0, 1):
 		if (amdgpu_tmz == 0) {
 			adev->gmc.tmz_enabled = false;
 			dev_info(adev->dev,
@@ -550,6 +548,7 @@ void amdgpu_gmc_tmz_set(struct amdgpu_device *adev)
 	case IP_VERSION(10, 3, 1):
 	/* YELLOW_CARP*/
 	case IP_VERSION(10, 3, 3):
+	case IP_VERSION(11, 0, 1):
 	case IP_VERSION(11, 0, 4):
 		/* Don't enable it by default yet.
 		 */
@@ -808,26 +807,19 @@ int amdgpu_gmc_vram_checking(struct amdgpu_device *adev)
 	 * seconds, so here, we just pick up three parts for emulation.
 	 */
 	ret = memcmp(vram_ptr, cptr, 10);
-	if (ret) {
-		ret = -EIO;
-		goto release_buffer;
-	}
+	if (ret)
+		return ret;
 
 	ret = memcmp(vram_ptr + (size / 2), cptr, 10);
-	if (ret) {
-		ret = -EIO;
-		goto release_buffer;
-	}
+	if (ret)
+		return ret;
 
 	ret = memcmp(vram_ptr + size - 10, cptr, 10);
-	if (ret) {
-		ret = -EIO;
-		goto release_buffer;
-	}
+	if (ret)
+		return ret;
 
-release_buffer:
 	amdgpu_bo_free_kernel(&vram_bo, &vram_gpu,
 			&vram_ptr);
 
-	return ret;
+	return 0;
 }

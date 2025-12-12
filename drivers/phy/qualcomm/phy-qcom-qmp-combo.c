@@ -1993,7 +1993,7 @@ static int qmp_combo_com_init(struct qmp_phy *qphy)
 	ret = regulator_bulk_enable(cfg->num_vregs, qmp->vregs);
 	if (ret) {
 		dev_err(qmp->dev, "failed to enable regulators, err=%d\n", ret);
-		goto err_decrement_count;
+		goto err_unlock;
 	}
 
 	ret = reset_control_bulk_assert(cfg->num_resets, qmp->resets);
@@ -2048,8 +2048,7 @@ err_assert_reset:
 	reset_control_bulk_assert(cfg->num_resets, qmp->resets);
 err_disable_regulators:
 	regulator_bulk_disable(cfg->num_vregs, qmp->vregs);
-err_decrement_count:
-	qmp->init_count--;
+err_unlock:
 	mutex_unlock(&qmp->phy_mutex);
 
 	return ret;

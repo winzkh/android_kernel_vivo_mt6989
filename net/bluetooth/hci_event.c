@@ -25,8 +25,6 @@
 /* Bluetooth HCI event handling. */
 
 #include <asm/unaligned.h>
-#include <linux/crypto.h>
-#include <crypto/algapi.h>
 
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
@@ -34,7 +32,6 @@
 
 #include "hci_request.h"
 #include "hci_debugfs.h"
-#include "hci_codec.h"
 #include "a2mp.h"
 #include "amp.h"
 #include "smp.h"
@@ -515,9 +512,6 @@ static u8 hci_cc_read_class_of_dev(struct hci_dev *hdev, void *data,
 {
 	struct hci_rp_read_class_of_dev *rp = data;
 
-	if (WARN_ON(!hdev))
-		return HCI_ERROR_UNSPECIFIED;
-
 	bt_dev_dbg(hdev, "status 0x%2.2x", rp->status);
 
 	if (rp->status)
@@ -749,23 +743,9 @@ static u8 hci_cc_read_enc_key_size(struct hci_dev *hdev, void *data,
 	} else {
 		conn->enc_key_size = rp->key_size;
 		status = 0;
-
-		if (conn->enc_key_size < hdev->min_enc_key_size) {
-			/* As slave role, the conn->state has been set to
-			 * BT_CONNECTED and l2cap conn req might not be received
-			 * yet, at this moment the l2cap layer almost does
-			 * nothing with the non-zero status.
-			 * So we also clear encrypt related bits, and then the
-			 * handler of l2cap conn req will get the right secure
-			 * state at a later time.
-			 */
-			status = HCI_ERROR_AUTH_FAILURE;
-			clear_bit(HCI_CONN_ENCRYPT, &conn->flags);
-			clear_bit(HCI_CONN_AES_CCM, &conn->flags);
-		}
 	}
 
-	hci_encrypt_cfm(conn, status);
+	hci_encrypt_cfm(conn, 0);
 
 done:
 	hci_dev_unlock(hdev);
@@ -901,13 +881,8 @@ static u8 hci_cc_read_local_ext_features(struct hci_dev *hdev, void *data,
 	if (rp->status)
 		return rp->status;
 
-	if (hdev->max_page < rp->max_page) {
-		if (test_bit(HCI_QUIRK_BROKEN_LOCAL_EXT_FEATURES_PAGE_2,
-			     &hdev->quirks))
-			bt_dev_warn(hdev, "broken local ext features page 2");
-		else
-			hdev->max_page = rp->max_page;
-	}
+	if (hdev->max_page < rp->max_page)
+		hdev->max_page = rp->max_page;
 
 	if (rp->page < HCI_MAX_PAGES)
 		memcpy(hdev->features[rp->page], rp->features, 8);
@@ -1578,7 +1553,7 @@ static u8 hci_cc_le_set_privacy_mode(struct hci_dev *hdev, void *data,
 
 	params = hci_conn_params_lookup(hdev, &cp->bdaddr, cp->bdaddr_type);
 	if (params)
-		WRITE_ONCE(params->privacy_mode, cp->mode);
+		params->privacy_mode = cp->mode;
 
 	hci_dev_unlock(hdev);
 
@@ -1761,7 +1736,7 @@ static void store_pending_adv_report(struct hci_dev *hdev, bdaddr_t *bdaddr,
 {
 	struct discovery_state *d = &hdev->discovery;
 
-	if (len > max_adv_len(hdev))
+	if (len > HCI_MAX_AD_LENGTH)
 		return;
 
 	bacpy(&d->last_adv_addr, bdaddr);
@@ -2315,8 +2290,7 @@ static void hci_cs_inquiry(struct hci_dev *hdev, __u8 status)
 		return;
 	}
 
-	if (hci_sent_cmd_data(hdev, HCI_OP_INQUIRY))
-		set_bit(HCI_INQUIRY, &hdev->flags);
+	set_bit(HCI_INQUIRY, &hdev->flags);
 }
 
 static void hci_cs_create_conn(struct hci_dev *hdev, __u8 status)
@@ -2810,9 +2784,6 @@ static void hci_cs_disconnect(struct hci_dev *hdev, u8 status)
 			hci_enable_advertising(hdev);
 		}
 
-		/* Inform sockets conn is gone before we delete it */
-		hci_disconn_cfm(conn, HCI_ERROR_UNSPECIFIED);
-
 		goto done;
 	}
 
@@ -2833,8 +2804,8 @@ static void hci_cs_disconnect(struct hci_dev *hdev, u8 status)
 
 		case HCI_AUTO_CONN_DIRECT:
 		case HCI_AUTO_CONN_ALWAYS:
-			hci_pend_le_list_del_init(params);
-			hci_pend_le_list_add(params, &hdev->pend_le_conns);
+			list_del_init(&params->action);
+			list_add(&params->action, &hdev->pend_le_conns);
 			break;
 
 		default:
@@ -3297,16 +3268,6 @@ static void hci_conn_request_evt(struct hci_dev *hdev, void *data,
 
 	bt_dev_dbg(hdev, "bdaddr %pMR type 0x%x", &ev->bdaddr, ev->link_type);
 
-	/* Reject incoming connection from device with same BD ADDR against
-	 * CVE-2020-26555
-	 */
-	if (hdev && !bacmp(&hdev->bdaddr, &ev->bdaddr)) {
-		bt_dev_dbg(hdev, "Reject connection with same BD_ADDR %pMR\n",
-			   &ev->bdaddr);
-		hci_reject_conn(hdev, &ev->bdaddr);
-		return;
-	}
-
 	mask |= hci_proto_connect_ind(hdev, &ev->bdaddr, ev->link_type,
 				      &flags);
 
@@ -3462,8 +3423,8 @@ static void hci_disconn_complete_evt(struct hci_dev *hdev, void *data,
 
 		case HCI_AUTO_CONN_DIRECT:
 		case HCI_AUTO_CONN_ALWAYS:
-			hci_pend_le_list_del_init(params);
-			hci_pend_le_list_add(params, &hdev->pend_le_conns);
+			list_del_init(&params->action);
+			list_add(&params->action, &hdev->pend_le_conns);
 			hci_update_passive_scan(hdev);
 			break;
 
@@ -3511,8 +3472,14 @@ static void hci_auth_complete_evt(struct hci_dev *hdev, void *data,
 
 	if (!ev->status) {
 		clear_bit(HCI_CONN_AUTH_FAILURE, &conn->flags);
-		set_bit(HCI_CONN_AUTH, &conn->flags);
-		conn->sec_level = conn->pending_sec_level;
+
+		if (!hci_conn_ssp_enabled(conn) &&
+		    test_bit(HCI_CONN_REAUTH_PEND, &conn->flags)) {
+			bt_dev_info(hdev, "re-auth of legacy device is not possible.");
+		} else {
+			set_bit(HCI_CONN_AUTH, &conn->flags);
+			conn->sec_level = conn->pending_sec_level;
+		}
 	} else {
 		if (ev->status == HCI_ERROR_PIN_OR_KEY_MISSING)
 			set_bit(HCI_CONN_AUTH_FAILURE, &conn->flags);
@@ -3521,6 +3488,7 @@ static void hci_auth_complete_evt(struct hci_dev *hdev, void *data,
 	}
 
 	clear_bit(HCI_CONN_AUTH_PEND, &conn->flags);
+	clear_bit(HCI_CONN_REAUTH_PEND, &conn->flags);
 
 	if (conn->state == BT_CONFIG) {
 		if (!ev->status && hci_conn_ssp_enabled(conn)) {
@@ -3566,6 +3534,8 @@ static void hci_remote_name_evt(struct hci_dev *hdev, void *data,
 	struct hci_conn *conn;
 
 	bt_dev_dbg(hdev, "status 0x%2.2x", ev->status);
+
+	hci_conn_check_pending(hdev);
 
 	hci_dev_lock(hdev);
 
@@ -4707,15 +4677,6 @@ static void hci_link_key_notify_evt(struct hci_dev *hdev, void *data,
 	if (!conn)
 		goto unlock;
 
-	/* Ignore NULL link key against CVE-2020-26555 */
-	if (!crypto_memneq(ev->link_key, ZERO_KEY, HCI_LINK_KEY_SIZE)) {
-		bt_dev_dbg(hdev, "Ignore NULL link key (ZERO KEY) for %pMR",
-			   &ev->bdaddr);
-		hci_disconnect(conn, HCI_ERROR_AUTH_FAILURE);
-		hci_conn_drop(conn);
-		goto unlock;
-	}
-
 	hci_conn_hold(conn);
 	conn->disc_timeout = HCI_DISCONN_TIMEOUT;
 	hci_conn_drop(conn);
@@ -5251,8 +5212,8 @@ static u8 bredr_oob_data_present(struct hci_conn *conn)
 		 * available, then do not declare that OOB data is
 		 * present.
 		 */
-		if (!crypto_memneq(data->rand256, ZERO_KEY, 16) ||
-		    !crypto_memneq(data->hash256, ZERO_KEY, 16))
+		if (!memcmp(data->rand256, ZERO_KEY, 16) ||
+		    !memcmp(data->hash256, ZERO_KEY, 16))
 			return 0x00;
 
 		return 0x02;
@@ -5262,8 +5223,8 @@ static u8 bredr_oob_data_present(struct hci_conn *conn)
 	 * not supported by the hardware, then check that if
 	 * P-192 data values are present.
 	 */
-	if (!crypto_memneq(data->rand192, ZERO_KEY, 16) ||
-	    !crypto_memneq(data->hash192, ZERO_KEY, 16))
+	if (!memcmp(data->rand192, ZERO_KEY, 16) ||
+	    !memcmp(data->hash192, ZERO_KEY, 16))
 		return 0x00;
 
 	return 0x01;
@@ -5280,11 +5241,8 @@ static void hci_io_capa_request_evt(struct hci_dev *hdev, void *data,
 	hci_dev_lock(hdev);
 
 	conn = hci_conn_hash_lookup_ba(hdev, ACL_LINK, &ev->bdaddr);
-	if (!conn || !hci_dev_test_flag(hdev, HCI_SSP_ENABLED))
+	if (!conn)
 		goto unlock;
-
-	/* Assume remote supports SSP since it has triggered this event */
-	set_bit(HCI_CONN_SSP_ENABLED, &conn->flags);
 
 	hci_conn_hold(conn);
 
@@ -5530,7 +5488,7 @@ static void hci_simple_pair_complete_evt(struct hci_dev *hdev, void *data,
 	hci_dev_lock(hdev);
 
 	conn = hci_conn_hash_lookup_ba(hdev, ACL_LINK, &ev->bdaddr);
-	if (!conn || !hci_conn_ssp_enabled(conn))
+	if (!conn)
 		goto unlock;
 
 	/* Reset the authentication requirement to unknown */
@@ -5989,7 +5947,7 @@ static void le_conn_complete_evt(struct hci_dev *hdev, u8 status,
 	params = hci_pend_le_action_lookup(&hdev->pend_le_conns, &conn->dst,
 					   conn->dst_type);
 	if (params) {
-		hci_pend_le_list_del_init(params);
+		list_del_init(&params->action);
 		if (params->conn) {
 			hci_conn_drop(params->conn);
 			hci_conn_put(params->conn);
@@ -6240,9 +6198,8 @@ static void process_adv_report(struct hci_dev *hdev, u8 type, bdaddr_t *bdaddr,
 		return;
 	}
 
-	if (len > max_adv_len(hdev)) {
-		bt_dev_err_ratelimited(hdev,
-				       "adv larger than maximum supported");
+	if (!ext_adv && len > HCI_MAX_AD_LENGTH) {
+		bt_dev_err_ratelimited(hdev, "legacy adv larger than 31 bytes");
 		return;
 	}
 
@@ -6307,8 +6264,7 @@ static void process_adv_report(struct hci_dev *hdev, u8 type, bdaddr_t *bdaddr,
 	 */
 	conn = check_pending_le_conn(hdev, bdaddr, bdaddr_type, bdaddr_resolved,
 				     type);
-	if (!ext_adv && conn && type == LE_ADV_IND &&
-	    len <= max_adv_len(hdev)) {
+	if (!ext_adv && conn && type == LE_ADV_IND && len <= HCI_MAX_AD_LENGTH) {
 		/* Store report for later inclusion by
 		 * mgmt_device_connected
 		 */
@@ -6346,18 +6302,23 @@ static void process_adv_report(struct hci_dev *hdev, u8 type, bdaddr_t *bdaddr,
 		return;
 	}
 
-	/* When receiving a scan response, then there is no way to
+	/* When receiving non-connectable or scannable undirected
+	 * advertising reports, this means that the remote device is
+	 * not connectable and then clearly indicate this in the
+	 * device found event.
+	 *
+	 * When receiving a scan response, then there is no way to
 	 * know if the remote device is connectable or not. However
 	 * since scan responses are merged with a previously seen
 	 * advertising report, the flags field from that report
 	 * will be used.
 	 *
-	 * In the unlikely case that a controller just sends a scan
-	 * response event that doesn't match the pending report, then
-	 * it is marked as a standalone SCAN_RSP.
+	 * In the really unlikely case that a controller get confused
+	 * and just sends a scan response event, then it is marked as
+	 * not connectable as well.
 	 */
 	if (type == LE_ADV_SCAN_RSP)
-		flags = MGMT_DEV_FOUND_SCAN_RSP;
+		flags = MGMT_DEV_FOUND_NOT_CONNECTABLE;
 
 	/* If there's nothing pending either store the data from this
 	 * event or send an immediate device found event if the data
@@ -6449,7 +6410,7 @@ static void hci_le_adv_report_evt(struct hci_dev *hdev, void *data,
 					info->length + 1))
 			break;
 
-		if (info->length <= max_adv_len(hdev)) {
+		if (info->length <= HCI_MAX_AD_LENGTH) {
 			rssi = info->data[info->length];
 			process_adv_report(hdev, info->type, &info->bdaddr,
 					   info->bdaddr_type, NULL, 0, rssi,
@@ -6718,10 +6679,6 @@ static void hci_le_remote_conn_param_req_evt(struct hci_dev *hdev, void *data,
 	if (!hcon || hcon->state != BT_CONNECTED)
 		return send_conn_param_neg_reply(hdev, handle,
 						 HCI_ERROR_UNKNOWN_CONN_ID);
-
-	if (max > hcon->le_conn_max_interval)
-		return send_conn_param_neg_reply(hdev, handle,
-						 HCI_ERROR_INVALID_LL_PARAMS);
 
 	if (hci_check_conn_params(min, max, latency, timeout))
 		return send_conn_param_neg_reply(hdev, handle,
@@ -7252,10 +7209,10 @@ static void hci_store_wake_reason(struct hci_dev *hdev, u8 event,
 	 * keep track of the bdaddr of the connection event that woke us up.
 	 */
 	if (event == HCI_EV_CONN_REQUEST) {
-		bacpy(&hdev->wake_addr, &conn_request->bdaddr);
+		bacpy(&hdev->wake_addr, &conn_complete->bdaddr);
 		hdev->wake_addr_type = BDADDR_BREDR;
 	} else if (event == HCI_EV_CONN_COMPLETE) {
-		bacpy(&hdev->wake_addr, &conn_complete->bdaddr);
+		bacpy(&hdev->wake_addr, &conn_request->bdaddr);
 		hdev->wake_addr_type = BDADDR_BREDR;
 	} else if (event == HCI_EV_LE_META) {
 		struct hci_ev_le_meta *le_ev = (void *)skb->data;

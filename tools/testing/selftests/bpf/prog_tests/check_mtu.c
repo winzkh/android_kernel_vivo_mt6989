@@ -183,7 +183,7 @@ cleanup:
 
 void serial_test_check_mtu(void)
 {
-	int mtu_lo;
+	__u32 mtu_lo;
 
 	if (test__start_subtest("bpf_check_mtu XDP-attach"))
 		test_check_mtu_xdp_attach();

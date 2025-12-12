@@ -291,19 +291,19 @@ static void handle_break(struct pt_regs *regs)
 	}
 
 #ifdef CONFIG_KPROBES
-	if (unlikely(iir == PARISC_KPROBES_BREAK_INSN && !user_mode(regs))) {
+	if (unlikely(iir == PARISC_KPROBES_BREAK_INSN)) {
 		parisc_kprobe_break_handler(regs);
 		return;
 	}
-	if (unlikely(iir == PARISC_KPROBES_BREAK_INSN2 && !user_mode(regs))) {
+	if (unlikely(iir == PARISC_KPROBES_BREAK_INSN2)) {
 		parisc_kprobe_ss_handler(regs);
 		return;
 	}
 #endif
 
 #ifdef CONFIG_KGDB
-	if (unlikely((iir == PARISC_KGDB_COMPILED_BREAK_INSN ||
-		iir == PARISC_KGDB_BREAK_INSN)) && !user_mode(regs)) {
+	if (unlikely(iir == PARISC_KGDB_COMPILED_BREAK_INSN ||
+		iir == PARISC_KGDB_BREAK_INSN)) {
 		kgdb_handle_exception(9, SIGTRAP, 0, regs);
 		return;
 	}

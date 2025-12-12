@@ -380,12 +380,6 @@ struct cap_wait {
 	int			want;
 };
 
-enum {
-	CEPH_MDSC_STOPPING_BEGIN = 1,
-	CEPH_MDSC_STOPPING_FLUSHING = 2,
-	CEPH_MDSC_STOPPING_FLUSHED = 3,
-};
-
 /*
  * mds client state
  */
@@ -402,11 +396,7 @@ struct ceph_mds_client {
 	struct ceph_mds_session **sessions;    /* NULL for mds if no session */
 	atomic_t		num_sessions;
 	int                     max_sessions;  /* len of sessions array */
-
-	spinlock_t              stopping_lock;  /* protect snap_empty */
-	int                     stopping;      /* the stage of shutting down */
-	atomic_t                stopping_blockers;
-	struct completion	stopping_waiter;
+	int                     stopping;      /* true if shutting down */
 
 	atomic64_t		quotarealms_count; /* # realms with quota */
 	/*
@@ -551,7 +541,8 @@ extern void ceph_flush_cap_releases(struct ceph_mds_client *mdsc,
 extern void ceph_queue_cap_reclaim_work(struct ceph_mds_client *mdsc);
 extern void ceph_reclaim_caps_nr(struct ceph_mds_client *mdsc, int nr);
 extern int ceph_iterate_session_caps(struct ceph_mds_session *session,
-				     int (*cb)(struct inode *, int mds, void *),
+				     int (*cb)(struct inode *,
+					       struct ceph_cap *, void *),
 				     void *arg);
 extern void ceph_mdsc_pre_umount(struct ceph_mds_client *mdsc);
 

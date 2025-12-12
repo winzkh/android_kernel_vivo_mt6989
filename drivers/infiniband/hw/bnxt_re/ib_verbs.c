@@ -796,10 +796,7 @@ fail:
 int bnxt_re_destroy_qp(struct ib_qp *ib_qp, struct ib_udata *udata)
 {
 	struct bnxt_re_qp *qp = container_of(ib_qp, struct bnxt_re_qp, ib_qp);
-	struct bnxt_qplib_qp *qplib_qp = &qp->qplib_qp;
 	struct bnxt_re_dev *rdev = qp->rdev;
-	struct bnxt_qplib_nq *scq_nq = NULL;
-	struct bnxt_qplib_nq *rcq_nq = NULL;
 	unsigned int flags;
 	int rc;
 
@@ -832,15 +829,6 @@ int bnxt_re_destroy_qp(struct ib_qp *ib_qp, struct ib_udata *udata)
 
 	ib_umem_release(qp->rumem);
 	ib_umem_release(qp->sumem);
-
-	/* Flush all the entries of notification queue associated with
-	 * given qp.
-	 */
-	scq_nq = qplib_qp->scq->nq;
-	rcq_nq = qplib_qp->rcq->nq;
-	bnxt_re_synchronize_nq(scq_nq);
-	if (scq_nq != rcq_nq)
-		bnxt_re_synchronize_nq(rcq_nq);
 
 	return 0;
 }
@@ -1710,7 +1698,7 @@ int bnxt_re_modify_srq(struct ib_srq *ib_srq, struct ib_srq_attr *srq_attr,
 	switch (srq_attr_mask) {
 	case IB_SRQ_MAX_WR:
 		/* SRQ resize is not supported */
-		return -EINVAL;
+		break;
 	case IB_SRQ_LIMIT:
 		/* Change the SRQ threshold */
 		if (srq_attr->srq_limit > srq->qplib_srq.max_wqe)
@@ -1725,12 +1713,13 @@ int bnxt_re_modify_srq(struct ib_srq *ib_srq, struct ib_srq_attr *srq_attr,
 		/* On success, update the shadow */
 		srq->srq_limit = srq_attr->srq_limit;
 		/* No need to Build and send response back to udata */
-		return 0;
+		break;
 	default:
 		ibdev_err(&rdev->ibdev,
 			  "Unsupported srq_attr_mask 0x%x", srq_attr_mask);
 		return -EINVAL;
 	}
+	return 0;
 }
 
 int bnxt_re_query_srq(struct ib_srq *ib_srq, struct ib_srq_attr *srq_attr)
@@ -3252,7 +3241,9 @@ static int bnxt_re_process_raw_qp_pkt_rx(struct bnxt_re_qp *gsi_qp,
 	udwr.remote_qkey = gsi_sqp->qplib_qp.qkey;
 
 	/* post data received  in the send queue */
-	return bnxt_re_post_send_shadow_qp(rdev, gsi_sqp, swr);
+	rc = bnxt_re_post_send_shadow_qp(rdev, gsi_sqp, swr);
+
+	return 0;
 }
 
 static void bnxt_re_process_res_rawqp1_wc(struct ib_wc *wc,

@@ -2658,13 +2658,11 @@ ieee80211_he_oper_size(const u8 *he_oper_ie)
 static inline const struct ieee80211_he_6ghz_oper *
 ieee80211_he_6ghz_oper(const struct ieee80211_he_operation *he_oper)
 {
-	const u8 *ret;
+	const u8 *ret = (const void *)&he_oper->optional;
 	u32 he_oper_params;
 
 	if (!he_oper)
 		return NULL;
-
-	ret = (const void *)&he_oper->optional;
 
 	he_oper_params = le32_to_cpu(he_oper->he_oper_params);
 
@@ -4575,13 +4573,17 @@ static inline u8 ieee80211_mle_common_size(const u8 *data)
 
 	switch (u16_get_bits(control, IEEE80211_ML_CONTROL_TYPE)) {
 	case IEEE80211_ML_CONTROL_TYPE_BASIC:
+		common += sizeof(struct ieee80211_mle_basic_common_info);
+		break;
 	case IEEE80211_ML_CONTROL_TYPE_PREQ:
-	case IEEE80211_ML_CONTROL_TYPE_TDLS:
+		common += sizeof(struct ieee80211_mle_preq_common_info);
+		break;
 	case IEEE80211_ML_CONTROL_TYPE_RECONF:
-		/*
-		 * The length is the first octet pointed by mle->variable so no
-		 * need to add anything
-		 */
+		if (control & IEEE80211_MLC_RECONF_PRES_MLD_MAC_ADDR)
+			common += ETH_ALEN;
+		return common;
+	case IEEE80211_ML_CONTROL_TYPE_TDLS:
+		common += sizeof(struct ieee80211_mle_tdls_common_info);
 		break;
 	case IEEE80211_ML_CONTROL_TYPE_PRIO_ACCESS:
 		if (control & IEEE80211_MLC_PRIO_ACCESS_PRES_AP_MLD_MAC_ADDR)

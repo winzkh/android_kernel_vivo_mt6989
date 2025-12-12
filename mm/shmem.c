@@ -805,16 +805,14 @@ unsigned long shmem_partial_swap_usage(struct address_space *mapping,
 	XA_STATE(xas, &mapping->i_pages, start);
 	struct page *page;
 	unsigned long swapped = 0;
-	unsigned long max = end - 1;
 
 	rcu_read_lock();
-	xas_for_each(&xas, page, max) {
+	xas_for_each(&xas, page, end - 1) {
 		if (xas_retry(&xas, page))
 			continue;
 		if (xa_is_value(page))
 			swapped++;
-		if (xas.xa_index == max)
-			break;
+
 		if (need_resched()) {
 			xas_pause(&xas);
 			cond_resched_rcu();
@@ -1029,24 +1027,7 @@ whole_folios:
 				}
 				VM_BUG_ON_FOLIO(folio_test_writeback(folio),
 						folio);
-
-				if (!folio_test_large(folio)) {
-					truncate_inode_folio(mapping, folio);
-				} else if (truncate_inode_partial_folio(folio, lstart, lend)) {
-					/*
-					 * If we split a page, reset the loop so
-					 * that we pick up the new sub pages.
-					 * Otherwise the THP was entirely
-					 * dropped or the target range was
-					 * zeroed, so just continue the loop as
-					 * is.
-					 */
-					if (!folio_test_large(folio)) {
-						folio_unlock(folio);
-						index = start;
-						break;
-					}
-				}
+				truncate_inode_folio(mapping, folio);
 			}
 			index = folio->index + folio_nr_pages(folio) - 1;
 			folio_unlock(folio);
@@ -1792,7 +1773,6 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 
 	/* We have to do this with folio locked to prevent races */
 	folio_lock(folio);
-	trace_android_vh_shmem_swapin_folio(folio);
 	if (!folio_test_swapcache(folio) ||
 	    folio_swap_entry(folio).val != swap.val ||
 	    !shmem_confirm_swap(mapping, index, swap)) {
@@ -3513,8 +3493,6 @@ static int shmem_parse_one(struct fs_context *fc, struct fs_parameter *param)
 	unsigned long long size;
 	char *rest;
 	int opt;
-	kuid_t kuid;
-	kgid_t kgid;
 
 	opt = fs_parse(fc, shmem_fs_parameters, param, &result);
 	if (opt < 0)
@@ -3550,32 +3528,14 @@ static int shmem_parse_one(struct fs_context *fc, struct fs_parameter *param)
 		ctx->mode = result.uint_32 & 07777;
 		break;
 	case Opt_uid:
-		kuid = make_kuid(current_user_ns(), result.uint_32);
-		if (!uid_valid(kuid))
+		ctx->uid = make_kuid(current_user_ns(), result.uint_32);
+		if (!uid_valid(ctx->uid))
 			goto bad_value;
-
-		/*
-		 * The requested uid must be representable in the
-		 * filesystem's idmapping.
-		 */
-		if (!kuid_has_mapping(fc->user_ns, kuid))
-			goto bad_value;
-
-		ctx->uid = kuid;
 		break;
 	case Opt_gid:
-		kgid = make_kgid(current_user_ns(), result.uint_32);
-		if (!gid_valid(kgid))
+		ctx->gid = make_kgid(current_user_ns(), result.uint_32);
+		if (!gid_valid(ctx->gid))
 			goto bad_value;
-
-		/*
-		 * The requested gid must be representable in the
-		 * filesystem's idmapping.
-		 */
-		if (!kgid_has_mapping(fc->user_ns, kgid))
-			goto bad_value;
-
-		ctx->gid = kgid;
 		break;
 	case Opt_huge:
 		ctx->huge = result.uint_32;
@@ -4187,7 +4147,7 @@ static struct file_system_type shmem_fs_type = {
 	.name		= "tmpfs",
 	.init_fs_context = ramfs_init_fs_context,
 	.parameters	= ramfs_fs_parameters,
-	.kill_sb	= ramfs_kill_sb,
+	.kill_sb	= kill_litter_super,
 	.fs_flags	= FS_USERNS_MOUNT,
 };
 

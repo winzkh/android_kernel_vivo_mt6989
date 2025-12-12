@@ -1258,11 +1258,7 @@ static void slot_complete_v1_hw(struct hisi_hba *hisi_hba,
 
 		slot_err_v1_hw(hisi_hba, task, slot);
 		if (unlikely(slot->abort)) {
-			if (dev_is_sata(device) && task->ata_task.use_ncq)
-				sas_ata_device_link_abort(device, true);
-			else
-				sas_task_abort(task);
-
+			sas_task_abort(task);
 			return;
 		}
 		goto out;
